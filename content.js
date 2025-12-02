@@ -1,4 +1,3 @@
-// content.js
 let jsPDFInstance = null;
 
 (async () => {
@@ -24,27 +23,18 @@ let jsPDFInstance = null;
   }
 })();
 
-// --- TEXT CLEANER ---
 function cleanText(text) {
   if (!text) return "";
   return text
-    // Remove tracking artifacts with various patterns
     .replace(/Ø[A-Za-z0-9=<>_\-\u00C0-\u00FF]+/g, "")
     .replace(/Ø=[\s\S]{0,5}/g, "")
-    // Remove specific problematic character combinations
     .replace(/þ\s*ã/g, "")
     .replace(/[\u00FE][\s]*[\u00E3]/g, "")
-    // Remove individual problematic characters
     .replace(/[\u00D8\u00DC\u00DD\u00F0\u00FE\u00E3\u00C0-\u00FF]/gi, "")
-    // Remove private use area characters
     .replace(/[\uE000-\uF8FF]/g, "")
-    // Remove zero-width and control characters
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "")
-    // Remove Copy code buttons
     .replace(/Copy code/g, "")
-    // Fix spaced-out capital letters
     .replace(/\b([A-Z])[ \t]+(?=[A-Z]\b)/g, "$1")
-    // Normalize whitespace
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -87,12 +77,10 @@ function parseMarkdownDom(element) {
         structuredText.push('\n'); 
       } 
       else if (tag === 'pre') {
-        // CODE BLOCK DETECTION
         const codeElement = node.querySelector('code');
         const codeText = codeElement ? codeElement.innerText : node.innerText;
         const language = codeElement ? (codeElement.className.match(/language-(\w+)/) || [])[1] || 'code' : 'code';
         
-        // Store code block separately
         const codeId = `[CODE_BLOCK_${codeBlocks.length}]`;
         codeBlocks.push({
           id: codeId,
@@ -100,7 +88,6 @@ function parseMarkdownDom(element) {
           code: codeText.trim()
         });
         
-        // Add placeholder in text
         structuredText.push(`\n${codeId}\n`);
       } 
       else if (tag === 'div') {
@@ -124,15 +111,11 @@ function extractConversation() {
   const titleElement = document.querySelector('h1, [class*="text-2xl"]');
   const title = titleElement ? titleElement.innerText.trim() : 'ChatGPT Conversation';
 
-  console.log('[Extract] Found articles:', articles.length);
-
   articles.forEach((article, index) => {
     let role = "assistant";
     if (article.querySelector('[data-message-author-role="user"]')) {
       role = "user";
     }
-
-    console.log(`[Extract] Article ${index + 1}: role=${role}`);
 
     const contentNode = article.querySelector('.markdown') || article.querySelector('[data-message-author-role] + div');
 
@@ -140,7 +123,6 @@ function extractConversation() {
       const parsed = parseMarkdownDom(contentNode);
       let cleanedText = cleanText(parsed.text);
 
-      // Extract images
       const images = [];
       contentNode.querySelectorAll('img').forEach(img => {
         if (img.src && !img.src.includes('icon')) {
@@ -148,7 +130,6 @@ function extractConversation() {
         }
       });
 
-      // Extract SVGs (diagrams)
       contentNode.querySelectorAll('svg').forEach(svg => {
         if (svg.getBBox && svg.getBBox().width > 50) {
           const svgClone = svg.cloneNode(true);
@@ -173,7 +154,6 @@ function extractConversation() {
           codeBlocks: parsed.codeBlocks,
           images: images.length > 0 ? images : []
         });
-        console.log(`[Extract] Added ${role} message (${cleanedText.length} chars, ${images.length} images)`);
       }
     }
   });
@@ -186,12 +166,8 @@ function extractConversation() {
       words: messages.reduce((acc, m) => acc + m.text.split(/\s+/).length, 0)
   };
 
-  console.log('[Extract] Final stats:', stats);
-
   return { title, date, stats, messages };
 }
-
-// --- EXPORTERS ---
 
 function downloadMarkdown(data) {
     let md = `# ${data.title}\n\n`;
@@ -290,8 +266,6 @@ async function generatePDF(data) {
   window.postMessage({ type: 'GENERATE_PDF', data }, '*');
 }
 
-// --- UI ---
-
 function createFloatingMenu() {
   if (document.getElementById("chatgpt-exporter-menu")) return;
 
@@ -356,7 +330,6 @@ function createFloatingMenu() {
   document.body.appendChild(container);
 }
 
-// Use MutationObserver to handle SPA navigation
 const observer = new MutationObserver(() => {
   if (document.querySelector('main') && !document.getElementById("chatgpt-exporter-menu")) {
     createFloatingMenu();
