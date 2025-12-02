@@ -24,20 +24,15 @@
       "js": ["content.js"],
       "run_at": "document_idle"
     }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["libs/jspdf.umd.min.js", "injected.js"],
+      "matches": [
+        "https://chat.openai.com/*",
+        "https://chatgpt.com/*"
+      ]
+    }
   ]
-
-  ,
-
-"web_accessible_resources": [
-  {
-    "resources": [
-      "libs/jspdf.umd.min.js",
-      "injected.js"
-    ],
-    "matches": [
-      "https://chat.openai.com/*",
-      "https://chatgpt.com/*"
-    ]
-  }
-]
 }

@@ -29,29 +29,35 @@
       const margin = 40;
       const avatarSize = 30;
       const bubblePadding = 15;
-      const maxBubbleWidth = 400; // Maximum width for chat bubbles
+      const maxBubbleWidth = 300; // Reduced to prevent text overflow
       const contentWidth = maxBubbleWidth - (bubblePadding * 2);
+
+      console.log('[PDF] Starting generation...');
+      console.log('[PDF] Total messages:', data.messages.length);
+      console.log('[PDF] User messages:', data.messages.filter(m => m.role === 'user').length);
+      console.log('[PDF] AI messages:', data.messages.filter(m => m.role === 'assistant').length);
 
       let y = margin;
 
       // --- HEADER ---
       pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(18);
+      pdf.setFontSize(16);
       pdf.setTextColor(0);
       pdf.text(data.title, margin, y);
       y += 20;
 
       pdf.setFont('helvetica', 'normal');
-      pdf.setFontSize(10);
+      pdf.setFontSize(9);
       pdf.setTextColor(100);
       pdf.text(`${data.date} • ${data.stats.total} messages • ${data.stats.words} words`, margin, y);
-      y += 20;
+      y += 8;
 
       pdf.setDrawColor(220);
       pdf.line(margin, y, pageWidth - margin, y);
-      y += 30;
+      y += 15;
 
       // --- MESSAGES ---
+      let isFirstMessage = true;
       for (const msg of data.messages) {
         const isUser = msg.role === 'user';
         const bubbleColor = isUser ? '#dcf8c6' : '#f0f0f0'; // WhatsApp-style colors
@@ -68,10 +74,11 @@
           });
         }
         
-        // 1. Prepare Text
-        const lines = pdf.splitTextToSize(displayText, contentWidth);
-        const lineHeight = 14;
-        const textBlockHeight = lines.length * lineHeight;
+        // 1. Prepare Text with proper wrapping
+        const maxTextWidth = contentWidth - 30; // Extra large safety margin
+        const lines = pdf.splitTextToSize(displayText, maxTextWidth);
+        const lineHeight = 12;
+        const textBlockHeight = lines.length * lineHeight + 15;
         
         // 2. Calculate Total Height (Text + Images/SVGs)
         let totalHeight = textBlockHeight + (bubblePadding * 2) + 10;
@@ -88,36 +95,40 @@
             }
         }
 
-        // 3. Page Break Check
-        if (y + totalHeight + avatarSize > pageHeight - margin) {
+        // 3. Page Break Check - skip for first message to keep it on first page
+        if (!isFirstMessage && y + totalHeight + avatarSize > pageHeight - margin) {
           pdf.addPage();
           y = margin;
         }
+        
+        isFirstMessage = false;
 
         // 4. Calculate Positions
         let avatarX, bubbleX;
         
         if (isUser) {
-          // User message: Right side
+          // User message: Right side with proper spacing
           bubbleX = pageWidth - margin - maxBubbleWidth;
-          avatarX = pageWidth - margin - avatarSize;
+          avatarX = pageWidth - margin - (avatarSize / 2);
         } else {
           // Assistant message: Left side
+          avatarX = margin + (avatarSize / 2);
           bubbleX = margin + avatarSize + 10;
-          avatarX = margin;
         }
+
+        console.log(`[PDF] Message ${data.messages.indexOf(msg) + 1}: ${isUser ? 'User' : 'AI'} at y=${y}, bubbleX=${bubbleX}`);
 
         // 5. Draw Avatar
         const avatarY = y;
-        pdf.setFillColor(isUser ? '#10a37f' : '#8b5cf6'); // Green for user, Purple for AI
-        pdf.circle(avatarX + (avatarSize / 2), avatarY + (avatarSize / 2), avatarSize / 2, 'F');
+        pdf.setFillColor(isUser ? '#10a37f' : '#8b5cf6');
+        pdf.circle(avatarX, avatarY + (avatarSize / 2), avatarSize / 2, 'F');
         
         pdf.setTextColor(255);
         pdf.setFontSize(10);
         pdf.setFont('helvetica', 'bold');
         const initial = isUser ? 'U' : 'AI';
         const textWidth = pdf.getTextWidth(initial);
-        pdf.text(initial, avatarX + (avatarSize / 2) - (textWidth / 2), avatarY + (avatarSize / 2) + 3);
+        pdf.text(initial, avatarX - (textWidth / 2), avatarY + (avatarSize / 2) + 3);
 
         // 6. Draw Bubble
         pdf.setFillColor(bubbleColor);
@@ -125,7 +136,7 @@
         pdf.roundedRect(bubbleX, y, maxBubbleWidth, totalHeight, 8, 8, 'F');
 
         // 7. Draw Text with Code Block Styling
-        let currentY = y + bubblePadding + 8;
+        let currentY = y + bubblePadding + 10;
         let inCodeBlock = false;
         
         for (const line of lines) {
@@ -158,9 +169,9 @@
             pdf.setTextColor(textColor);
             pdf.text(line, bubbleX + bubblePadding, currentY);
           } else {
-            // Normal text
+            // Normal text - already wrapped by splitTextToSize
             pdf.setFont('helvetica', 'normal');
-            pdf.setFontSize(10);
+            pdf.setFontSize(8.5);
             pdf.setTextColor(textColor);
             pdf.text(line, bubbleX + bubblePadding, currentY);
           }
@@ -205,7 +216,7 @@
             }
         }
 
-        y += totalHeight + 25; // Spacing between messages
+        y += totalHeight + 20; // Spacing between messages
       }
 
       const filename = data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50) + ".pdf";

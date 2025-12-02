@@ -28,11 +28,23 @@ let jsPDFInstance = null;
 function cleanText(text) {
   if (!text) return "";
   return text
-    .replace(/Ø[A-Za-z0-9=<>_\-]+/g, "")
-    .replace(/[\u00D8\u00DC\u00DD\u00F0\u00FE]/g, "")
+    // Remove tracking artifacts with various patterns
+    .replace(/Ø[A-Za-z0-9=<>_\-\u00C0-\u00FF]+/g, "")
+    .replace(/Ø=[\s\S]{0,5}/g, "")
+    // Remove specific problematic character combinations
+    .replace(/þ\s*ã/g, "")
+    .replace(/[\u00FE][\s]*[\u00E3]/g, "")
+    // Remove individual problematic characters
+    .replace(/[\u00D8\u00DC\u00DD\u00F0\u00FE\u00E3\u00C0-\u00FF]/gi, "")
+    // Remove private use area characters
     .replace(/[\uE000-\uF8FF]/g, "")
+    // Remove zero-width and control characters
+    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "")
+    // Remove Copy code buttons
     .replace(/Copy code/g, "")
+    // Fix spaced-out capital letters
     .replace(/\b([A-Z])[ \t]+(?=[A-Z]\b)/g, "$1")
+    // Normalize whitespace
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -112,11 +124,15 @@ function extractConversation() {
   const titleElement = document.querySelector('h1, [class*="text-2xl"]');
   const title = titleElement ? titleElement.innerText.trim() : 'ChatGPT Conversation';
 
-  articles.forEach((article) => {
+  console.log('[Extract] Found articles:', articles.length);
+
+  articles.forEach((article, index) => {
     let role = "assistant";
     if (article.querySelector('[data-message-author-role="user"]')) {
       role = "user";
     }
+
+    console.log(`[Extract] Article ${index + 1}: role=${role}`);
 
     const contentNode = article.querySelector('.markdown') || article.querySelector('[data-message-author-role] + div');
 
@@ -155,8 +171,9 @@ function extractConversation() {
           role, 
           text: cleanedText,
           codeBlocks: parsed.codeBlocks,
-          images: images.length > 0 ? images : undefined
+          images: images.length > 0 ? images : []
         });
+        console.log(`[Extract] Added ${role} message (${cleanedText.length} chars, ${images.length} images)`);
       }
     }
   });
@@ -168,6 +185,8 @@ function extractConversation() {
       assistant: messages.filter(m => m.role === 'assistant').length,
       words: messages.reduce((acc, m) => acc + m.text.split(/\s+/).length, 0)
   };
+
+  console.log('[Extract] Final stats:', stats);
 
   return { title, date, stats, messages };
 }
