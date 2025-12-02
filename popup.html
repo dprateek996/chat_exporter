@@ -1,177 +1,183 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ChatGPT Exporter</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ChatGPT Exporter</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
 
-        body {
-            width: 350px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 0;
-        }
+    body {
+      width: 340px;
+      background: #1a1a1a;
+      color: #e5e5e5;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 0;
+    }
 
-        .container {
-            background: white;
-        }
+    .header {
+      background: linear-gradient(135deg, #2d2d2d 0%, #1a1a1a 100%);
+      padding: 24px 20px;
+      border-bottom: 1px solid #333;
+    }
 
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 24px 20px;
-            text-align: center;
-        }
+    .logo-section {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
 
-        .header h1 {
-            font-size: 20px;
-            margin-bottom: 6px;
-            font-weight: 700;
-        }
+    .icon {
+      font-size: 28px;
+    }
 
-        .header p {
-            font-size: 12px;
-            opacity: 0.9;
-        }
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+      color: #fff;
+    }
 
-        .content {
-            padding: 20px;
-        }
+    .subtitle {
+      font-size: 13px;
+      color: #999;
+      margin-top: 4px;
+      font-weight: 400;
+    }
 
-        .info-box {
-            background: #f8f9ff;
-            padding: 16px;
-            border-radius: 8px;
-            margin-bottom: 16px;
-            border-left: 4px solid #667eea;
-        }
+    .content {
+      padding: 20px;
+    }
 
-        .info-box h3 {
-            color: #667eea;
-            font-size: 14px;
-            margin-bottom: 8px;
-        }
+    .feature-list {
+      list-style: none;
+      margin-bottom: 20px;
+    }
 
-        .info-box p {
-            font-size: 12px;
-            color: #666;
-            line-height: 1.5;
-        }
+    .feature-list li {
+      padding: 11px 0;
+      font-size: 14px;
+      color: #d1d1d1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid #2a2a2a;
+    }
 
-        .features {
-            list-style: none;
-            margin: 16px 0;
-        }
+    .feature-list li:last-child {
+      border-bottom: none;
+    }
 
-        .features li {
-            font-size: 12px;
-            padding: 8px 0;
-            border-bottom: 1px solid #f0f0f0;
-            color: #444;
-        }
+    .check {
+      color: #10a37f;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
 
-        .features li:last-child {
-            border-bottom: none;
-        }
+    .export-btn {
+      width: 100%;
+      padding: 13px;
+      background: #10a37f;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 12px;
+    }
 
-        .features li:before {
-            content: "✓";
-            color: #10a37f;
-            font-weight: bold;
-            margin-right: 8px;
-        }
+    .export-btn:hover {
+      background: #0d8f6d;
+    }
 
-        .btn {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
+    .export-btn:active {
+      transform: scale(0.98);
+    }
 
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
-        }
+    .footer {
+      text-align: center;
+      padding: 16px 20px;
+      font-size: 12px;
+      color: #666;
+      border-top: 1px solid #2a2a2a;
+    }
 
-        .btn:active {
-            transform: translateY(0);
-        }
+    .footer a {
+      color: #888;
+      text-decoration: none;
+    }
 
-        .footer {
-            padding: 16px 20px;
-            text-align: center;
-            font-size: 11px;
-            color: #999;
-            border-top: 1px solid #f0f0f0;
-        }
+    .footer a:hover {
+      color: #10a37f;
+    }
 
-        .status {
-            font-size: 12px;
-            padding: 8px 12px;
-            border-radius: 6px;
-            margin-top: 12px;
-            text-align: center;
-            display: none;
-        }
+    .version {
+      display: inline-block;
+      background: #2a2a2a;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      color: #777;
+      margin-left: 8px;
+    }
 
-        .status.success {
-            background: #d4edda;
-            color: #155724;
-            display: block;
-        }
+    .formats {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
 
-        .status.error {
-            background: #f8d7da;
-            color: #721c24;
-            display: block;
-        }
-    </style>
+    .format-tag {
+      flex: 1;
+      padding: 6px;
+      background: #2a2a2a;
+      border-radius: 4px;
+      text-align: center;
+      font-size: 11px;
+      color: #999;
+      font-weight: 500;
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>📝 ChatGPT Exporter</h1>
-            <p>Export conversations to beautiful PDFs</p>
-        </div>
-
-        <div class="content">
-            <div class="info-box">
-                <h3>🎨 Beautiful Formatting</h3>
-                <p>Your conversations are exported with professional styling, colors, and layout.</p>
-            </div>
-
-            <ul class="features">
-                <li>Color-coded user & assistant messages</li>
-                <li>Gradient headers with date stamps</li>
-                <li>Page numbers and footers</li>
-                <li>Rounded message boxes</li>
-                <li>Full conversation lazy-loading</li>
-            </ul>
-
-            <button class="btn" id="exportBtn">
-                Open ChatGPT to Export
-            </button>
-
-            <div class="status" id="status"></div>
-        </div>
-
-        <div class="footer">
-            Made with ❤️ for better learning
-        </div>
+  <div class="header">
+    <div class="logo-section">
+      <span class="icon">📄</span>
+      <div>
+        <h1>ChatGPT Exporter<span class="version">v0.1</span></h1>
+        <p class="subtitle">Save your conversations</p>
+      </div>
     </div>
+  </div>
 
-    <script src="popup.js"></script>
+  <div class="content">
+    <ul class="feature-list">
+      <li><span class="check">✓</span> WhatsApp-style chat bubbles</li>
+      <li><span class="check">✓</span> Code blocks with syntax</li>
+      <li><span class="check">✓</span> Diagrams & images included</li>
+      <li><span class="check">✓</span> Multiple export formats</li>
+    </ul>
+
+    <button class="export-btn" id="open-chatgpt-btn">Open ChatGPT to Export</button>
+
+    <div class="formats">
+      <div class="format-tag">PDF</div>
+      <div class="format-tag">MD</div>
+      <div class="format-tag">HTML</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Built for students & professionals
+  </div>
+
+  <script src="popup.js"></script>
 </body>
 </html>

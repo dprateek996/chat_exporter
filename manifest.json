@@ -7,13 +7,12 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "ChatGPT Exporter",
     "default_popup": "popup.html"
   },
   "permissions": [],
   "host_permissions": [
-    "https://chat.openai.com/*",
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
   ],
   "content_scripts": [
     {
@@ -25,7 +24,6 @@
       "run_at": "document_idle"
     }
   ],
-
   "web_accessible_resources": [
     {
       "resources": ["libs/jspdf.umd.min.js", "injected.js"],
