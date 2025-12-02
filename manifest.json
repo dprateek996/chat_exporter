@@ -34,7 +34,10 @@
       "libs/jspdf.umd.min.js",
       "injected.js"
     ],
-    "matches": ["<all_urls>"]
+    "matches": [
+      "https://chat.openai.com/*",
+      "https://chatgpt.com/*"
+    ]
   }
 ]
 }
