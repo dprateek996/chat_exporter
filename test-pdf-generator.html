@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChatGPT-Style PDF Generator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .editor-section {
+            padding: 40px;
+        }
+
+        .input-group {
+            margin-bottom: 30px;
+        }
+
+        .input-group label {
+            display: block;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+        }
+
+        .input-group input,
+        .input-group textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-family: inherit;
+            transition: all 0.3s;
+        }
+
+        .input-group input:focus,
+        .input-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .input-group textarea {
+            min-height: 400px;
+            resize: vertical;
+            line-height: 1.6;
+        }
+
+        .format-guide {
+            background: #f8f9ff;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+        }
+
+        .format-guide h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .format-guide code {
+            background: white;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #e83e8c;
+            font-family: 'Courier New', monospace;
+        }
+
+        .format-guide ul {
+            margin-left: 20px;
+            line-height: 1.8;
+        }
+
+        .btn-generate {
+            width: 100%;
+            padding: 18px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn-generate:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-generate:active {
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📝 ChatGPT-Style PDF Generator</h1>
+            <p>Create beautifully formatted study notes and documentation</p>
+        </div>
+
+        <div class="editor-section">
+            <div class="format-guide">
+                <h3>📚 Formatting Guide</h3>
+                <ul>
+                    <li><code># Heading</code> - Main heading</li>
+                    <li><code>## Subheading</code> - Subheading</li>
+                    <li><code>### Small heading</code> - Small heading</li>
+                    <li><code>**bold text**</code> - Bold text</li>
+                    <li><code>- Item</code> - Bullet point</li>
+                    <li><code>1. Item</code> - Numbered list</li>
+                    <li><code>`code`</code> - Inline code</li>
+                    <li><code>---</code> - Horizontal line</li>
+                </ul>
+            </div>
+
+            <div class="input-group">
+                <label for="title">📌 Document Title</label>
+                <input type="text" id="title" placeholder="e.g., Introduction to Machine Learning">
+            </div>
+
+            <div class="input-group">
+                <label for="subtitle">📎 Subtitle (Optional)</label>
+                <input type="text" id="subtitle" placeholder="e.g., Comprehensive Study Notes">
+            </div>
+
+            <div class="input-group">
+                <label for="content">✍️ Your Content</label>
+                <textarea id="content" placeholder="Start typing your formatted content here...
+
+Example:
+# Introduction
+This is a **bold** statement.
+
+## Key Concepts
+- First point
+- Second point
+- Third point
+
+### Code Example
+Use `function()` to call methods.
+
+---
+
+## Conclusion
+Your summary here."></textarea>
+            </div>
+
+            <button class="btn-generate" onclick="generatePDF()">
+                🎨 Generate Beautiful PDF
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const { jsPDF } = window.jspdf;
+
+        function generatePDF() {
+            const title = document.getElementById('title').value || 'Untitled Document';
+            const subtitle = document.getElementById('subtitle').value;
+            const content = document.getElementById('content').value;
+
+            if (!content.trim()) {
+                alert('Please enter some content!');
+                return;
+            }
+
+            const pdf = new jsPDF({
+                orientation: 'portrait',
+                unit: 'mm',
+                format: 'a4'
+            });
+
+            const pageWidth = pdf.internal.pageSize.getWidth();
+            const pageHeight = pdf.internal.pageSize.getHeight();
+            const margin = 20;
+            const contentWidth = pageWidth - (margin * 2);
+            let yPosition = margin;
+
+            const colors = {
+                primary: [102, 126, 234],
+                secondary: [118, 75, 162],
+                dark: [33, 33, 33],
+                light: [100, 100, 100],
+                accent: [255, 87, 51],
+                code: [248, 249, 250]
+            };
+
+            pdf.setFillColor(...colors.primary);
+            pdf.rect(0, 0, pageWidth, 50, 'F');
+            
+            pdf.setFillColor(118, 75, 162);
+            pdf.setGState(new pdf.GState({ opacity: 0.7 }));
+            pdf.rect(pageWidth/2, 0, pageWidth/2, 50, 'F');
+            pdf.setGState(new pdf.GState({ opacity: 1 }));
+
+            pdf.setTextColor(255, 255, 255);
+            pdf.setFontSize(28);
+            pdf.setFont(undefined, 'bold');
+            const titleLines = pdf.splitTextToSize(title, contentWidth);
+            pdf.text(titleLines, margin, 25);
+
+            if (subtitle) {
+                pdf.setFontSize(14);
+                pdf.setFont(undefined, 'normal');
+                pdf.text(subtitle, margin, 38);
+            }
+
+            pdf.setFontSize(10);
+            const date = new Date().toLocaleDateString('en-US', { 
+                year: 'numeric', 
+                month: 'long', 
+                day: 'numeric' 
+            });
+            pdf.text(date, pageWidth - margin - pdf.getTextWidth(date), 45);
+
+            yPosition = 65;
+            pdf.setTextColor(...colors.dark);
+
+            const lines = content.split('\n');
+            
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i];
+                
+                if (yPosition > pageHeight - 30) {
+                    addFooter(pdf, pageWidth, pageHeight, colors);
+                    pdf.addPage();
+                    yPosition = margin;
+                }
+
+                if (line.trim() === '') {
+                    yPosition += 5;
+                    continue;
+                }
+
+                if (line.trim() === '---') {
+                    yPosition += 5;
+                    pdf.setDrawColor(...colors.light);
+                    pdf.setLineWidth(0.5);
+                    pdf.line(margin, yPosition, pageWidth - margin, yPosition);
+                    yPosition += 8;
+                    continue;
+                }
+
+                if (line.startsWith('# ')) {
+                    yPosition += 8;
+                    pdf.setFontSize(22);
+                    pdf.setFont(undefined, 'bold');
+                    pdf.setTextColor(...colors.primary);
+                    
+                    const headingText = line.substring(2);
+                    const headingLines = pdf.splitTextToSize(headingText, contentWidth);
+                    pdf.text(headingLines, margin, yPosition);
+                    yPosition += headingLines.length * 10;
+                    
+                    pdf.setDrawColor(...colors.primary);
+                    pdf.setLineWidth(1);
+                    pdf.line(margin, yPosition, margin + 40, yPosition);
+                    yPosition += 8;
+                    
+                    pdf.setTextColor(...colors.dark);
+                    continue;
+                }
+
+                if (line.startsWith('## ')) {
+                    yPosition += 6;
+                    pdf.setFontSize(16);
+                    pdf.setFont(undefined, 'bold');
+                    pdf.setTextColor(...colors.secondary);
+                    
+                    const subheadingText = line.substring(3);
+                    const subheadingLines = pdf.splitTextToSize(subheadingText, contentWidth);
+                    pdf.text(subheadingLines, margin, yPosition);
+                    yPosition += subheadingLines.length * 8 + 5;
+                    
+                    pdf.setTextColor(...colors.dark);
+                    continue;
+                }
+
+                if (line.startsWith('### ')) {
+                    yPosition += 5;
+                    pdf.setFontSize(13);
+                    pdf.setFont(undefined, 'bold');
+                    pdf.setTextColor(...colors.accent);
+                    
+                    const smallHeadingText = line.substring(4);
+                    const smallHeadingLines = pdf.splitTextToSize(smallHeadingText, contentWidth);
+                    pdf.text(smallHeadingLines, margin, yPosition);
+                    yPosition += smallHeadingLines.length * 7 + 4;
+                    
+                    pdf.setTextColor(...colors.dark);
+                    continue;
+                }
+
+                if (line.trim().startsWith('- ')) {
+                    pdf.setFontSize(11);
+                    pdf.setFont(undefined, 'normal');
+                    
+                    const bulletText = line.trim().substring(2);
+                    const textLines = pdf.splitTextToSize(bulletText, contentWidth - 7);
+                    
+                    pdf.setFillColor(...colors.primary);
+                    pdf.circle(margin + 2, yPosition - 1.5, 1, 'F');
+                    
+                    pdf.text(textLines, margin + 7, yPosition);
+                    yPosition += textLines.length * 6 + 2;
+                    continue;
+                }
+
+                if (/^\d+\.\s/.test(line.trim())) {
+                    pdf.setFontSize(11);
+                    pdf.setFont(undefined, 'normal');
+                    
+                    const match = line.trim().match(/^(\d+\.)\s(.+)$/);
+                    if (match) {
+                        const number = match[1];
+                        const text = match[2];
+                        
+                        pdf.setTextColor(...colors.primary);
+                        pdf.setFont(undefined, 'bold');
+                        pdf.text(number, margin, yPosition);
+                        
+                        pdf.setTextColor(...colors.dark);
+                        pdf.setFont(undefined, 'normal');
+                        const textLines = pdf.splitTextToSize(text, contentWidth - 10);
+                        pdf.text(textLines, margin + 10, yPosition);
+                        yPosition += textLines.length * 6 + 2;
+                    }
+                    continue;
+                }
+
+                pdf.setFontSize(11);
+                pdf.setFont(undefined, 'normal');
+                pdf.setTextColor(...colors.dark);
+                
+                const textLines = pdf.splitTextToSize(line, contentWidth);
+                pdf.text(textLines, margin, yPosition);
+                yPosition += textLines.length * 6 + 2;
+            }
+
+            addFooter(pdf, pageWidth, pageHeight, colors);
+
+            const filename = title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+            pdf.save(`${filename}.pdf`);
+        }
+
+        function addFooter(pdf, pageWidth, pageHeight, colors) {
+            const pageNumber = pdf.internal.getCurrentPageInfo().pageNumber;
+            
+            pdf.setFontSize(9);
+            pdf.setTextColor(...colors.light);
+            pdf.setFont(undefined, 'normal');
+            
+            const pageText = `Page ${pageNumber}`;
+            const pageTextWidth = pdf.getTextWidth(pageText);
+            pdf.text(pageText, (pageWidth - pageTextWidth) / 2, pageHeight - 10);
+            
+            pdf.setDrawColor(...colors.light);
+            pdf.setLineWidth(0.3);
+            pdf.line(20, pageHeight - 15, pageWidth - 20, pageHeight - 15);
+        }
+    </script>
+</body>
+</html>
