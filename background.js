@@ -7,7 +7,8 @@ chrome.runtime.onInstalled.addListener(() => {
     documentUrlPatterns: [
       'https://chatgpt.com/*',
       'https://chat.openai.com/*',
-      'https://gemini.google.com/*'
+      'https://gemini.google.com/*',
+      'https://claude.ai/*'
     ]
   });
 
@@ -18,7 +19,8 @@ chrome.runtime.onInstalled.addListener(() => {
     documentUrlPatterns: [
       'https://chatgpt.com/*',
       'https://chat.openai.com/*',
-      'https://gemini.google.com/*'
+      'https://gemini.google.com/*',
+      'https://claude.ai/*'
     ]
   });
 });

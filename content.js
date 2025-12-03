@@ -11,6 +11,7 @@ let jsPDFInstance = null;
 let jsPDFLib = null;
 const isGemini = location.hostname.includes('gemini.google.com');
 const isChatGPT = location.hostname.includes('chatgpt.com') || location.hostname.includes('openai.com');
+const isClaude = location.hostname.includes('claude.ai');
 
 // UI patterns to filter out from extraction
 const UI_PATTERNS = [
@@ -19,7 +20,8 @@ const UI_PATTERNS = [
   /^new chat$/i, /^pro$/i, /^show thinking/i, /^thinking/i,
   /^add files$/i, /^explore gems$/i, /^more options$/i,
   /^double-check/i, /^report/i, /^invite a friend/i,
-  /gemini can make mistakes/i, /^\+$/, /^choose your model/i
+  /gemini can make mistakes/i, /^\+$/, /^choose your model/i,
+  /^claude$/i, /^retry$/i, /^continue$/i, /^projects$/i
 ];
 
 // ============================================
@@ -28,8 +30,8 @@ const UI_PATTERNS = [
 
 (async () => {
   try {
-    if (isGemini) {
-      console.log('📚 Loading jsPDF for Gemini...');
+    if (isGemini || isClaude) {
+      console.log(`📚 Loading jsPDF for ${isClaude ? 'Claude' : 'Gemini'}...`);
       const jsPDFUrl = chrome.runtime.getURL('libs/jspdf.umd.min.js');
       await import(jsPDFUrl);
       
@@ -214,6 +216,136 @@ async function extractGeminiContent() {
 }
 
 // ============================================
+// CLAUDE EXTRACTION
+// ============================================
+
+async function extractClaudeContent() {
+  console.log('🔍 Extracting Claude conversation...');
+  
+  // Scroll to load content
+  for (let i = 0; i < 15; i++) {
+    window.scrollTo(0, document.body.scrollHeight);
+    await wait(200);
+  }
+  window.scrollTo(0, 0);
+  await wait(300);
+  
+  // Get title
+  let title = document.title?.replace(' \\ Claude', '').replace('Claude', '').trim() || 'Claude Conversation';
+  
+  let extractedText = '';
+  const messages = [];
+  
+  // Claude's message structure - try multiple approaches
+  
+  // Approach 1: Look for assistant messages by data attributes
+  const assistantMessages = document.querySelectorAll('[data-is-streaming], [data-test-render-count]');
+  console.log(`Found ${assistantMessages.length} potential Claude messages`);
+  
+  for (const msg of assistantMessages) {
+    const text = msg.innerText?.trim();
+    if (text && text.length > 50 && !text.match(/^(Copy|Retry|Continue)/i)) {
+      messages.push(text);
+    }
+  }
+  
+  // Approach 2: Look for divs with specific Claude styling
+  if (messages.length === 0) {
+    const styledMessages = document.querySelectorAll('div.font-claude-message, div[class*="claude"]');
+    console.log(`Found ${styledMessages.length} styled messages`);
+    
+    for (const msg of styledMessages) {
+      const text = msg.innerText?.trim();
+      if (text && text.length > 100) {
+        messages.push(text);
+      }
+    }
+  }
+  
+  // Approach 3: Get all substantial text blocks in main
+  if (messages.length === 0) {
+    const main = document.querySelector('main');
+    if (main) {
+      const allDivs = main.querySelectorAll('div');
+      console.log(`Scanning ${allDivs.length} divs in main`);
+      
+      for (const div of allDivs) {
+        // Skip if it contains buttons or is navigation
+        if (div.querySelector('button, nav, aside, input, textarea')) continue;
+        
+        const text = div.innerText?.trim();
+        if (text && text.length > 150 && text.split(' ').length > 20) {
+          messages.push(text);
+        }
+      }
+    }
+  }
+  
+  extractedText = messages.join('\n\n');
+  console.log(`Extracted ${messages.length} message blocks, ${extractedText.length} chars`);
+  
+  // Final fallback: main content
+  if (!extractedText || extractedText.length < 100) {
+    console.log('Using fallback extraction');
+    const main = document.querySelector('main') || document.body;
+    const clone = main.cloneNode(true);
+    clone.querySelectorAll('nav, aside, header, [class*="sidebar"], button, input, textarea').forEach(el => el.remove());
+    extractedText = clone.innerText || '';
+  }
+  
+  // Clean the text
+  const lines = extractedText.split('\n');
+  const cleanedLines = [];
+  let foundContent = false;
+  
+  for (let line of lines) {
+    line = line.trim();
+    
+    if (!line) {
+      if (foundContent && cleanedLines[cleanedLines.length - 1] !== '') {
+        cleanedLines.push('');
+      }
+      continue;
+    }
+    
+    if (shouldFilterLine(line)) continue;
+    
+    // Skip user prompts at start
+    if (!foundContent && /^(give me|generate|create|make|write|list|explain|tell me|show me|help|what|how|why)/i.test(line)) {
+      continue;
+    }
+    
+    line = cleanText(line);
+    
+    // Normalize various bullet characters to standard bullet
+    line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u2713\u2714\u2715\u2716\u27A4\u25B6\u25BA\u25cf\u25cb\u25e6\u25c9\u25c6\u25c7\u25aa\u25ab\u2605\u2606\u2192\u27a4\u2794\u25ba]\s*/g, '• ');
+    line = line.replace(/^\*\s+/g, '• '); // Markdown asterisk bullets
+    line = line.replace(/^-\s+/g, '• '); // Dash bullets
+    
+    if (line) {
+      if (line.length > 50 || /^\d+\.\s+/.test(line) || /^•\s+/.test(line)) {
+        foundContent = true;
+      }
+      cleanedLines.push(line);
+    }
+  }
+  
+  const finalText = cleanedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  
+  console.log(`📊 Extracted ${finalText.length} characters`);
+  
+  return {
+    title,
+    messages: finalText.length > 50 ? [{
+      role: 'assistant',
+      text: finalText,
+      codeBlocks: [],
+      images: []
+    }] : []
+  };
+}
+
+// ============================================
 // CHATGPT EXTRACTION
 // ============================================
 
@@ -288,6 +420,8 @@ async function extractConversation() {
   
   if (isGemini) {
     result = await extractGeminiContent();
+  } else if (isClaude) {
+    result = await extractClaudeContent();
   } else if (isChatGPT) {
     result = await extractChatGPTContent();
   } else {
@@ -538,7 +672,7 @@ async function generatePDF(data) {
     return;
   }
   
-  if (isGemini && jsPDFLib) {
+  if ((isGemini || isClaude) && jsPDFLib) {
     generatePDFInContentScript(data);
   } else {
     window.postMessage({ type: 'GENERATE_PDF', data }, '*');
@@ -601,41 +735,61 @@ function createFloatingMenu() {
   const container = document.createElement('div');
   container.id = 'chat-exporter-menu';
   Object.assign(container.style, {
-    position: 'fixed', bottom: '20px', right: '20px', zIndex: '999999',
-    display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end'
+    position: 'fixed', bottom: '24px', right: '24px', zIndex: '999999',
+    display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'flex-end'
   });
   
   const menu = document.createElement('div');
   Object.assign(menu.style, {
-    display: 'none', flexDirection: 'column', gap: '6px',
-    background: 'white', padding: '12px', borderRadius: '12px',
-    boxShadow: '0 4px 20px rgba(0,0,0,0.15)', border: '1px solid #e0e0e0'
+    display: 'none', flexDirection: 'column', gap: '8px',
+    background: '#2a2a2a', padding: '14px', borderRadius: '14px',
+    boxShadow: '0 8px 32px rgba(0,0,0,0.4)', border: '1px solid #3a3a3a',
+    backdropFilter: 'blur(10px)'
   });
   
   const mainBtn = document.createElement('button');
-  mainBtn.textContent = '📄 Export Chat';
+  mainBtn.innerHTML = '<span style="margin-right:6px;">📄</span>Export';
   Object.assign(mainBtn.style, {
-    padding: '12px 20px', borderRadius: '25px', border: 'none',
-    background: 'linear-gradient(135deg, #10a37f, #0d8a6a)', color: 'white',
-    cursor: 'pointer', fontWeight: 'bold', fontSize: '14px',
-    boxShadow: '0 4px 15px rgba(16,163,127,0.3)', transition: 'transform 0.2s'
+    padding: '11px 18px', borderRadius: '10px', border: '1px solid #3a3a3a',
+    background: '#2a2a2a', color: '#e5e5e5',
+    cursor: 'pointer', fontWeight: '500', fontSize: '13px',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.3)', transition: 'all 0.2s',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
   });
-  mainBtn.onmouseover = () => mainBtn.style.transform = 'scale(1.05)';
-  mainBtn.onmouseout = () => mainBtn.style.transform = 'scale(1)';
+  mainBtn.onmouseover = () => {
+    mainBtn.style.background = '#333';
+    mainBtn.style.transform = 'translateY(-2px)';
+    mainBtn.style.boxShadow = '0 6px 20px rgba(0,0,0,0.4)';
+  };
+  mainBtn.onmouseout = () => {
+    mainBtn.style.background = '#2a2a2a';
+    mainBtn.style.transform = 'translateY(0)';
+    mainBtn.style.boxShadow = '0 4px 16px rgba(0,0,0,0.3)';
+  };
   
   const createItem = (emoji, text, onClick) => {
     const btn = document.createElement('button');
-    btn.textContent = `${emoji} ${text}`;
+    btn.innerHTML = `<span style="margin-right:8px;">${emoji}</span>${text}`;
     Object.assign(btn.style, {
-      padding: '10px 16px', borderRadius: '8px', border: '1px solid #eee',
-      background: 'white', color: '#333', cursor: 'pointer', fontSize: '13px',
-      textAlign: 'left', transition: 'background 0.2s'
+      padding: '10px 14px', borderRadius: '8px', border: '1px solid #3a3a3a',
+      background: '#222', color: '#e5e5e5', cursor: 'pointer', fontSize: '13px',
+      textAlign: 'left', transition: 'all 0.2s', display: 'flex', alignItems: 'center',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      fontWeight: '400', minWidth: '140px'
     });
-    btn.onmouseover = () => btn.style.background = '#f5f5f5';
-    btn.onmouseout = () => btn.style.background = 'white';
+    btn.onmouseover = () => {
+      btn.style.background = '#333';
+      btn.style.borderColor = '#4a4a4a';
+    };
+    btn.onmouseout = () => {
+      btn.style.background = '#222';
+      btn.style.borderColor = '#3a3a3a';
+    };
     btn.onclick = async () => {
-      mainBtn.textContent = '⏳ Processing...';
+      mainBtn.innerHTML = '<span style="margin-right:6px;">⏳</span>Processing...';
       mainBtn.disabled = true;
+      mainBtn.style.opacity = '0.6';
       try {
         const data = await extractConversation();
         if (data.messages.length === 0) {
@@ -646,8 +800,9 @@ function createFloatingMenu() {
       } catch (e) {
         alert('Export failed: ' + e.message);
       }
-      mainBtn.textContent = '📄 Export Chat';
+      mainBtn.innerHTML = '<span style="margin-right:6px;">📄</span>Export';
       mainBtn.disabled = false;
+      mainBtn.style.opacity = '1';
       menu.style.display = 'none';
     };
     return btn;
@@ -658,8 +813,22 @@ function createFloatingMenu() {
   menu.appendChild(createItem('🌐', 'HTML', downloadHTML));
   
   mainBtn.onclick = () => {
-    menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+    const isVisible = menu.style.display === 'flex';
+    menu.style.display = isVisible ? 'none' : 'flex';
+    if (!isVisible) {
+      menu.style.animation = 'slideUp 0.2s ease-out';
+    }
   };
+  
+  // Add animation styles
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  `;
+  document.head.appendChild(style);
   
   container.appendChild(menu);
   container.appendChild(mainBtn);
@@ -691,7 +860,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           sendResponse({ success: false });
           return;
         }
-        if (isGemini) {
+        if (isGemini || isClaude) {
           generatePDFInContentScript(data);
         } else {
           window.postMessage({ type: 'GENERATE_PDF', data }, '*');
@@ -706,4 +875,4 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
-console.log('✅ AI Chat Exporter loaded for:', isGemini ? 'Gemini' : isChatGPT ? 'ChatGPT' : 'Other');
+console.log('✅ ChatArchive loaded for:', isGemini ? 'Gemini' : isClaude ? 'Claude' : isChatGPT ? 'ChatGPT' : 'Other');
