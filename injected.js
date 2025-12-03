@@ -29,7 +29,7 @@
       const margin = 40;
       const avatarSize = 30;
       const bubblePadding = 15;
-      const maxBubbleWidth = 300;
+      const maxBubbleWidth = 400; // increased for better wrapping, aligns with Gemini
       const contentWidth = maxBubbleWidth - (bubblePadding * 2);
 
       let y = margin;

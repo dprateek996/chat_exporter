@@ -1,27 +1,37 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT Conversation Exporter",
-  "version": "0.1.0",
-  "description": "Export your full ChatGPT conversations as PDFs for studying and sharing.",
+  "name": "AI Chat Exporter - ChatGPT, Gemini & Claude",
+  "version": "1.0.0",
+  "description": "Export your AI conversations from ChatGPT, Google Gemini, and Claude AI to clean, formatted PDF documents.",
   "icons": {
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": "icons/icon128.png",
+    "default_title": "Export AI Conversation"
   },
-  "permissions": [],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["contextMenus"],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
+    "https://chat.openai.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
         "https://chat.openai.com/*",
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
       ],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_end",
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
@@ -29,8 +39,13 @@
       "resources": ["libs/jspdf.umd.min.js", "injected.js"],
       "matches": [
         "https://chat.openai.com/*",
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
       ]
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
 }
