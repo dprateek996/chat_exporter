@@ -22,6 +22,12 @@
     // Remove private use area characters (icons/symbols)
     cleaned = cleaned.replace(/[\uE000-\uF8FF]/g, '');
     
+    // Remove garbage icon font patterns like Ø=Ý
+    cleaned = cleaned
+      .replace(/Ø[=<>]?[A-Za-zÞþßÜÄŸ€Ý]*/g, '')
+      .replace(/[֍þãÜÀŸ¢ßØÞ€Ý]/g, '')
+      .replace(/[\uF000-\uFFFF]/g, '');
+    
     // Normalize Unicode to ASCII
     const unicodeToAscii = {
       '\u2018': "'", '\u2019': "'", '\u201A': "'", '\u201B': "'",

@@ -87,10 +87,20 @@ function cleanText(text, forPDF = false) {
   // Remove private use area characters (icons/symbols from custom fonts)
   cleaned = cleaned.replace(/[\uE000-\uF8FF]/g, '');
   
-  // Remove garbage/corrupted characters  
+  // Remove garbage/corrupted characters (icon fonts, symbol fonts)
   cleaned = cleaned
-    .replace(/[Ø][=<>]?[ÞþßÜÄŸ€]?[A-Z€]?/g, '')
-    .replace(/[֍þãÜÀŸ¢ßØÞ€]/g, '');
+    // Pattern: Ø followed by symbols and letters (common icon font garbage)
+    .replace(/Ø[=<>]?[A-Za-zÞþßÜÄŸ€Ý]*/g, '')
+    // Individual garbage characters from icon/symbol fonts
+    .replace(/[֍þãÜÀŸ¢ßØÞ€Ý]/g, '')
+    // More icon font patterns
+    .replace(/[\uF000-\uFFFF]/g, '') // Supplementary private use area
+    .replace(/[\u2700-\u27BF]/g, match => {
+      // Dingbats - convert some, remove others
+      if (match === '\u2713' || match === '\u2714') return '[v]';
+      if (match === '\u2717' || match === '\u2718') return '[x]';
+      return '';
+    });
   
   // Normalize common Unicode characters to ASCII equivalents
   const unicodeToAscii = {
@@ -176,56 +186,193 @@ function shouldFilterLine(line) {
 async function extractGeminiContent() {
   console.log('🔍 Extracting Gemini conversation...');
   
-  // Scroll to load content
-  for (let i = 0; i < 15; i++) {
+  // Scroll to load all content
+  for (let i = 0; i < 20; i++) {
     window.scrollTo(0, document.body.scrollHeight);
-    await wait(200);
+    await wait(150);
   }
   window.scrollTo(0, 0);
-  await wait(300);
+  await wait(500);
   
   // Get title
   let title = document.title?.replace(' - Google', '').replace('Gemini', '').trim() || 'Gemini Conversation';
   
-  // Try specific response selectors first
-  const selectors = [
+  const messages = [];
+  
+  // Gemini Pro structure: conversation turns are in specific containers
+  // Look for the main conversation container
+  
+  // Method 1: Find all conversation turns by looking for message containers
+  // Gemini typically uses data attributes or specific class patterns
+  
+  // Try to find user query containers and model response containers
+  const conversationContainer = document.querySelector('main') || document.body;
+  
+  // Gemini structures messages in turns - look for turn containers
+  // Common patterns: [class*="turn"], [class*="query"], [class*="response"]
+  const turnSelectors = [
+    '[class*="conversation-turn"]',
+    '[class*="query-content"]',
     '[class*="response-container"]',
-    '[class*="model-response"]', 
-    '[class*="markdown-content"]',
-    '[class*="message-content"]',
-    '.prose'
+    '[class*="message-wrapper"]',
+    '[class*="chat-message"]'
   ];
   
-  let extractedText = '';
+  let foundTurns = [];
   
-  for (const selector of selectors) {
-    const elements = document.querySelectorAll(selector);
+  // First, try to find structured turns
+  for (const selector of turnSelectors) {
+    const elements = conversationContainer.querySelectorAll(selector);
     if (elements.length > 0) {
-      const texts = [];
-      for (const el of elements) {
-        if (el.closest('nav, aside, [class*="sidebar"]')) continue;
-        const text = el.innerText?.trim();
-        if (text && text.length > 100) texts.push(text);
-      }
-      if (texts.length > 0) {
-        extractedText = texts.join('\n\n');
-        break;
-      }
+      foundTurns = Array.from(elements);
+      console.log(`Found ${foundTurns.length} turns with selector: ${selector}`);
+      break;
     }
   }
   
-  // Fallback: main content
-  if (!extractedText || extractedText.length < 100) {
+  // Method 2: If no structured turns, look for alternating user/model patterns
+  if (foundTurns.length === 0) {
+    // Look for elements that contain substantial text and are direct children of main areas
+    const allElements = conversationContainer.querySelectorAll('div[class]');
+    const candidates = [];
+    
+    for (const el of allElements) {
+      // Skip sidebar, nav, buttons
+      if (el.closest('nav, aside, header, footer, [class*="sidebar"], [class*="drawer"]')) continue;
+      if (el.querySelector('input, textarea')) continue;
+      
+      const text = el.innerText?.trim();
+      if (!text || text.length < 20) continue;
+      
+      // Check if this element has text that's not just from children
+      const directText = Array.from(el.childNodes)
+        .filter(n => n.nodeType === Node.TEXT_NODE)
+        .map(n => n.textContent.trim())
+        .join('');
+      
+      const rect = el.getBoundingClientRect();
+      // Must be in main content area (not sidebar)
+      if (rect.width < 300) continue;
+      
+      candidates.push({
+        el,
+        text,
+        top: rect.top + window.scrollY,
+        isUserLikely: text.length < 500 && !el.querySelector('pre, code, ul, ol')
+      });
+    }
+    
+    // Sort by vertical position
+    candidates.sort((a, b) => a.top - b.top);
+    
+    // Deduplicate - remove elements whose text is contained in another
+    const uniqueCandidates = [];
+    for (const candidate of candidates) {
+      const isDuplicate = uniqueCandidates.some(existing => 
+        existing.text.includes(candidate.text) || candidate.text.includes(existing.text)
+      );
+      if (!isDuplicate && candidate.text.length > 30) {
+        uniqueCandidates.push(candidate);
+      }
+    }
+    
+    foundTurns = uniqueCandidates.map(c => c.el);
+    console.log(`Found ${foundTurns.length} candidate turns via fallback method`);
+  }
+  
+  // Process found turns
+  for (let i = 0; i < foundTurns.length; i++) {
+    const turn = foundTurns[i];
+    let text = turn.innerText?.trim() || '';
+    
+    if (!text || text.length < 10) continue;
+    
+    // Clean the text
+    text = cleanText(text, false);
+    
+    // Filter out UI elements
+    if (shouldFilterLine(text)) continue;
+    
+    // Determine if this is user or assistant
+    // Heuristics:
+    // - User messages are typically shorter
+    // - User messages don't have lists, code blocks, headers
+    // - Check for specific class names
+    let role = 'assistant';
+    
+    const className = turn.className?.toLowerCase() || '';
+    const parentClass = turn.parentElement?.className?.toLowerCase() || '';
+    
+    if (className.includes('user') || className.includes('query') || className.includes('human') ||
+        parentClass.includes('user') || parentClass.includes('query') || parentClass.includes('human')) {
+      role = 'user';
+    } else if (className.includes('model') || className.includes('response') || className.includes('assistant') ||
+               parentClass.includes('model') || parentClass.includes('response') || parentClass.includes('assistant')) {
+      role = 'assistant';
+    } else {
+      // Use heuristics: alternate, with first being user
+      // Or check content characteristics
+      const hasStructuredContent = turn.querySelector('pre, code, ul, ol, h1, h2, h3');
+      const isLong = text.length > 300;
+      
+      if (hasStructuredContent || isLong) {
+        role = 'assistant';
+      } else if (messages.length === 0 || messages[messages.length - 1]?.role === 'assistant') {
+        role = 'user';
+      } else {
+        role = 'assistant';
+      }
+    }
+    
+    // Extract code blocks if present
+    const codeBlocks = [];
+    const codeElements = turn.querySelectorAll('pre code, pre');
+    codeElements.forEach((codeEl, idx) => {
+      const code = codeEl.innerText?.trim();
+      if (code && code.length > 10) {
+        const langClass = codeEl.className?.match(/language-(\w+)/);
+        const lang = langClass ? langClass[1] : 'code';
+        const id = `[CODE_${messages.length}_${idx}]`;
+        codeBlocks.push({ id, language: lang, code });
+        text = text.replace(code, id);
+      }
+    });
+    
+    messages.push({
+      role,
+      text: text.replace(/\n{3,}/g, '\n\n').trim(),
+      codeBlocks,
+      images: []
+    });
+  }
+  
+  // If still no messages, use fallback
+  if (messages.length === 0) {
+    console.log('Using full fallback extraction');
     const main = document.querySelector('main');
     if (main) {
       const clone = main.cloneNode(true);
-      clone.querySelectorAll('nav, aside, [class*="sidebar"], [class*="drawer"], button').forEach(el => el.remove());
-      extractedText = clone.innerText || '';
+      clone.querySelectorAll('nav, aside, [class*="sidebar"], [class*="drawer"], button, input, textarea').forEach(el => el.remove());
+      const text = cleanText(clone.innerText || '', false);
+      if (text.length > 50) {
+        messages.push({
+          role: 'assistant',
+          text,
+          codeBlocks: [],
+          images: []
+        });
+      }
     }
   }
   
-  // Clean the text
-  const lines = extractedText.split('\n');
+  console.log(`📊 Extracted ${messages.length} messages from Gemini`);
+  
+  return { title, messages };
+}
+
+// Legacy function kept for compatibility
+function processGeminiText(text) {
+  const lines = text.split('\n');
   const cleanedLines = [];
   let foundContent = false;
   
@@ -241,167 +388,233 @@ async function extractGeminiContent() {
     
     if (shouldFilterLine(line)) continue;
     
-    // Skip user prompts at start
-    if (!foundContent && /^(give me|generate|create|make|write|list|explain|tell me|show me|help|what|how|why)/i.test(line)) {
-      continue;
-    }
+    line = cleanText(line, false);
     
-    line = cleanText(line);
-    
-    // Normalize various bullet characters to standard dash (ASCII safe)
-    line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u2713\u2714\u2715\u2716\u27A4\u25B6\u25BA●○◦◉◆◇▪▫★☆→➤➔►]\s*/g, '- ');
-    line = line.replace(/^\*\s+/g, '- '); // Markdown asterisk bullets
+    // Normalize bullet characters
+    line = line.replace(/^[-*]\s+/g, '- ');
     
     if (line) {
-      if (line.length > 50 || /^\d+\.\s+/.test(line) || /^•\s+/.test(line)) {
-        foundContent = true;
-      }
+      foundContent = true;
       cleanedLines.push(line);
     }
   }
   
-  const finalText = cleanedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  
-  console.log(`📊 Extracted ${finalText.length} characters`);
-  
-  return {
-    title,
-    messages: finalText.length > 50 ? [{
-      role: 'assistant',
-      text: finalText,
-      codeBlocks: [],
-      images: []
-    }] : []
-  };
+  return cleanedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // ============================================
-// CLAUDE EXTRACTION
+// CLAUDE EXTRACTION  
 // ============================================
 
 async function extractClaudeContent() {
   console.log('🔍 Extracting Claude conversation...');
   
-  // Scroll to load content
-  for (let i = 0; i < 15; i++) {
+  // Scroll to load all content
+  for (let i = 0; i < 20; i++) {
     window.scrollTo(0, document.body.scrollHeight);
-    await wait(200);
+    await wait(150);
   }
   window.scrollTo(0, 0);
-  await wait(300);
+  await wait(500);
   
   // Get title
-  let title = document.title?.replace(' \\ Claude', '').replace('Claude', '').trim() || 'Claude Conversation';
+  let title = document.title?.replace(/\s*[-|]\s*Claude/gi, '').replace('Claude', '').trim() || 'Claude Conversation';
   
-  let extractedText = '';
   const messages = [];
   
-  // Claude's message structure - try multiple approaches
+  // Claude's DOM structure: look for human and assistant message containers
+  // Claude typically separates messages clearly with role indicators
   
-  // Approach 1: Look for assistant messages by data attributes
-  const assistantMessages = document.querySelectorAll('[data-is-streaming], [data-test-render-count]');
-  console.log(`Found ${assistantMessages.length} potential Claude messages`);
+  const conversationContainer = document.querySelector('main') || document.body;
   
-  for (const msg of assistantMessages) {
-    const text = msg.innerText?.trim();
-    if (text && text.length > 50 && !text.match(/^(Copy|Retry|Continue)/i)) {
-      messages.push(text);
+  // Method 1: Look for message containers with role attributes
+  // Claude often uses data-* attributes or specific class patterns
+  const messageSelectors = [
+    '[data-testid*="message"]',
+    '[class*="message-row"]',
+    '[class*="human-message"], [class*="assistant-message"]',
+    '[class*="user-message"], [class*="ai-message"]',
+    'div[class*="Message"]'
+  ];
+  
+  let messageElements = [];
+  
+  for (const selector of messageSelectors) {
+    const elements = conversationContainer.querySelectorAll(selector);
+    if (elements.length > 0) {
+      messageElements = Array.from(elements);
+      console.log(`Found ${messageElements.length} messages with selector: ${selector}`);
+      break;
     }
   }
   
-  // Approach 2: Look for divs with specific Claude styling
-  if (messages.length === 0) {
-    const styledMessages = document.querySelectorAll('div.font-claude-message, div[class*="claude"]');
-    console.log(`Found ${styledMessages.length} styled messages`);
+  // Method 2: Look for the conversation structure by finding grouped content
+  if (messageElements.length === 0) {
+    // Claude typically has a consistent structure - look for parent containers
+    // that hold both the role indicator and content
+    const allDivs = conversationContainer.querySelectorAll('div');
+    const candidates = [];
     
-    for (const msg of styledMessages) {
-      const text = msg.innerText?.trim();
-      if (text && text.length > 100) {
-        messages.push(text);
+    for (const div of allDivs) {
+      // Skip sidebar, nav, buttons, inputs
+      if (div.closest('nav, aside, header, footer, [class*="sidebar"]')) continue;
+      if (div.querySelector('input, textarea')) continue;
+      
+      const text = div.innerText?.trim();
+      if (!text || text.length < 15) continue;
+      
+      const rect = div.getBoundingClientRect();
+      // Must be in main content area
+      if (rect.width < 400) continue;
+      
+      // Check for role indicators in parent or self
+      const fullClass = (div.className + ' ' + (div.parentElement?.className || '')).toLowerCase();
+      const hasRoleIndicator = fullClass.includes('human') || fullClass.includes('user') || 
+                               fullClass.includes('assistant') || fullClass.includes('claude') ||
+                               fullClass.includes('message');
+      
+      if (hasRoleIndicator || text.length > 100) {
+        candidates.push({
+          el: div,
+          text,
+          top: rect.top + window.scrollY,
+          className: fullClass
+        });
       }
     }
+    
+    // Sort by vertical position
+    candidates.sort((a, b) => a.top - b.top);
+    
+    // Deduplicate - prefer shorter containers (more specific)
+    const uniqueCandidates = [];
+    const seenTexts = new Set();
+    
+    for (const candidate of candidates) {
+      // Create a signature from first/last 50 chars
+      const sig = (candidate.text.slice(0, 50) + candidate.text.slice(-50)).toLowerCase();
+      
+      // Check if this text is a substring of existing or vice versa
+      let isDuplicate = false;
+      for (const existing of uniqueCandidates) {
+        if (existing.text.includes(candidate.text) || candidate.text.includes(existing.text)) {
+          // Keep the more specific (shorter) one if it's substantial
+          if (candidate.text.length < existing.text.length && candidate.text.length > 30) {
+            existing.text = candidate.text;
+            existing.el = candidate.el;
+          }
+          isDuplicate = true;
+          break;
+        }
+      }
+      
+      if (!isDuplicate && !seenTexts.has(sig) && candidate.text.length > 20) {
+        seenTexts.add(sig);
+        uniqueCandidates.push(candidate);
+      }
+    }
+    
+    messageElements = uniqueCandidates.map(c => c.el);
+    console.log(`Found ${messageElements.length} candidate messages via fallback`);
   }
   
-  // Approach 3: Get all substantial text blocks in main
+  // Process found messages
+  for (let i = 0; i < messageElements.length; i++) {
+    const msgEl = messageElements[i];
+    let text = msgEl.innerText?.trim() || '';
+    
+    if (!text || text.length < 10) continue;
+    
+    // Clean the text
+    text = cleanText(text, false);
+    
+    // Filter out pure UI elements
+    if (shouldFilterLine(text)) continue;
+    if (/^(Copy|Retry|Continue|Edit|Share)$/i.test(text.split('\n')[0])) continue;
+    
+    // Determine role
+    let role = 'assistant';
+    
+    const className = (msgEl.className || '').toLowerCase();
+    const parentClass = (msgEl.parentElement?.className || '').toLowerCase();
+    const grandParentClass = (msgEl.parentElement?.parentElement?.className || '').toLowerCase();
+    const allClasses = className + ' ' + parentClass + ' ' + grandParentClass;
+    
+    // Check for explicit role indicators
+    if (allClasses.includes('human') || allClasses.includes('user')) {
+      role = 'user';
+    } else if (allClasses.includes('assistant') || allClasses.includes('claude') || allClasses.includes('ai-')) {
+      role = 'assistant';
+    } else {
+      // Use heuristics
+      const hasStructuredContent = msgEl.querySelector('pre, code, ul, ol, h1, h2, h3, table');
+      const isLong = text.length > 400;
+      const hasMultipleParagraphs = (text.match(/\n\n/g) || []).length >= 2;
+      
+      if (hasStructuredContent || isLong || hasMultipleParagraphs) {
+        role = 'assistant';
+      } else if (messages.length === 0 || messages[messages.length - 1]?.role === 'assistant') {
+        role = 'user';
+      } else {
+        role = 'assistant';
+      }
+    }
+    
+    // Extract code blocks
+    const codeBlocks = [];
+    const codeElements = msgEl.querySelectorAll('pre code, pre');
+    codeElements.forEach((codeEl, idx) => {
+      const code = codeEl.innerText?.trim();
+      if (code && code.length > 10) {
+        const langMatch = codeEl.className?.match(/language-(\w+)/);
+        const lang = langMatch ? langMatch[1] : 'code';
+        const id = `[CODE_${messages.length}_${idx}]`;
+        codeBlocks.push({ id, language: lang, code });
+        // Replace code in text with placeholder
+        text = text.replace(code, id);
+      }
+    });
+    
+    messages.push({
+      role,
+      text: text.replace(/\n{3,}/g, '\n\n').trim(),
+      codeBlocks,
+      images: []
+    });
+  }
+  
+  // Fallback: if no structured messages found, try to split by patterns
   if (messages.length === 0) {
+    console.log('Using full fallback extraction for Claude');
     const main = document.querySelector('main');
     if (main) {
-      const allDivs = main.querySelectorAll('div');
-      console.log(`Scanning ${allDivs.length} divs in main`);
+      const clone = main.cloneNode(true);
+      clone.querySelectorAll('nav, aside, [class*="sidebar"], button, input, textarea, svg').forEach(el => el.remove());
+      const text = cleanText(clone.innerText || '', false);
       
-      for (const div of allDivs) {
-        // Skip if it contains buttons or is navigation
-        if (div.querySelector('button, nav, aside, input, textarea')) continue;
-        
-        const text = div.innerText?.trim();
-        if (text && text.length > 150 && text.split(' ').length > 20) {
-          messages.push(text);
+      if (text.length > 50) {
+        // Try to split by "Human:" and "Assistant:" patterns if present
+        const parts = text.split(/(?:^|\n)(?:Human|You|User):\s*/i);
+        if (parts.length > 1) {
+          for (let i = 1; i < parts.length; i++) {
+            const assistantSplit = parts[i].split(/\n(?:Assistant|Claude):\s*/i);
+            if (assistantSplit.length >= 2) {
+              messages.push({ role: 'user', text: assistantSplit[0].trim(), codeBlocks: [], images: [] });
+              messages.push({ role: 'assistant', text: assistantSplit[1].trim(), codeBlocks: [], images: [] });
+            } else {
+              messages.push({ role: 'user', text: parts[i].trim(), codeBlocks: [], images: [] });
+            }
+          }
+        } else {
+          messages.push({ role: 'assistant', text, codeBlocks: [], images: [] });
         }
       }
     }
   }
   
-  extractedText = messages.join('\n\n');
-  console.log(`Extracted ${messages.length} message blocks, ${extractedText.length} chars`);
+  console.log(`📊 Extracted ${messages.length} messages from Claude`);
   
-  // Final fallback: main content
-  if (!extractedText || extractedText.length < 100) {
-    console.log('Using fallback extraction');
-    const main = document.querySelector('main') || document.body;
-    const clone = main.cloneNode(true);
-    clone.querySelectorAll('nav, aside, header, [class*="sidebar"], button, input, textarea').forEach(el => el.remove());
-    extractedText = clone.innerText || '';
-  }
-  
-  // Clean the text
-  const lines = extractedText.split('\n');
-  const cleanedLines = [];
-  let foundContent = false;
-  
-  for (let line of lines) {
-    line = line.trim();
-    
-    if (!line) {
-      if (foundContent && cleanedLines[cleanedLines.length - 1] !== '') {
-        cleanedLines.push('');
-      }
-      continue;
-    }
-    
-    if (shouldFilterLine(line)) continue;
-    
-    // Skip user prompts at start
-    if (!foundContent && /^(give me|generate|create|make|write|list|explain|tell me|show me|help|what|how|why)/i.test(line)) {
-      continue;
-    }
-    
-    line = cleanText(line);
-    
-    // Normalize various bullet characters to standard dash (ASCII safe)
-    line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u2713\u2714\u2715\u2716\u27A4\u25B6\u25BA\u25cf\u25cb\u25e6\u25c9\u25c6\u25c7\u25aa\u25ab\u2605\u2606\u2192\u27a4\u2794\u25ba]\s*/g, '- ');
-    line = line.replace(/^\*\s+/g, '- '); // Markdown asterisk bullets
-    
-    if (line) {
-      if (line.length > 50 || /^\d+\.\s+/.test(line) || /^•\s+/.test(line)) {
-        foundContent = true;
-      }
-      cleanedLines.push(line);
-    }
-  }
-  
-  const finalText = cleanedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  
-  console.log(`📊 Extracted ${finalText.length} characters`);
-  
-  return {
-    title,
-    messages: finalText.length > 50 ? [{
-      role: 'assistant',
-      text: finalText,
-      codeBlocks: [],
-      images: []
-    }] : []
-  };
+  return { title, messages };
 }
 
 // ============================================
