@@ -72,29 +72,90 @@ const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
  * Clean text by removing garbage characters and fixing spacing
+ * Also sanitizes for PDF output (jsPDF only supports basic Latin characters)
  */
-function cleanText(text) {
+function cleanText(text, forPDF = false) {
   if (!text) return '';
   
   let cleaned = text;
   
-  // Remove garbage/corrupted characters
+  // Remove zero-width and invisible characters
+  cleaned = cleaned
+    .replace(/[\u200B-\u200D\uFEFF\u00AD\u200E\u200F]/g, '')
+    .replace(/[\u2028\u2029]/g, '\n'); // Line/paragraph separators
+  
+  // Remove private use area characters (icons/symbols from custom fonts)
+  cleaned = cleaned.replace(/[\uE000-\uF8FF]/g, '');
+  
+  // Remove garbage/corrupted characters  
   cleaned = cleaned
     .replace(/[Ø][=<>]?[ÞþßÜÄŸ€]?[A-Z€]?/g, '')
-    .replace(/[֍þãÜÀŸ¢ßØÞ€]/g, '')
-    .replace(/[\uE000-\uF8FF]/g, '')
-    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '');
+    .replace(/[֍þãÜÀŸ¢ßØÞ€]/g, '');
+  
+  // Normalize common Unicode characters to ASCII equivalents
+  const unicodeToAscii = {
+    // Quotes
+    '\u2018': "'", '\u2019': "'", '\u201A': "'", '\u201B': "'",
+    '\u201C': '"', '\u201D': '"', '\u201E': '"', '\u201F': '"',
+    '\u2039': '<', '\u203A': '>',
+    '\u00AB': '"', '\u00BB': '"',
+    // Dashes
+    '\u2013': '-', '\u2014': '-', '\u2015': '-', '\u2212': '-',
+    // Spaces
+    '\u00A0': ' ', '\u2002': ' ', '\u2003': ' ', '\u2009': ' ',
+    // Ellipsis
+    '\u2026': '...',
+    // Arrows (convert to text)
+    '\u2192': '->', '\u2190': '<-', '\u2194': '<->',
+    '\u21D2': '=>', '\u21D0': '<=',
+    '\u27A4': '->', '\u2794': '->', '\u279C': '->',
+    // Math symbols
+    '\u00D7': 'x', '\u00F7': '/',
+    '\u2260': '!=', '\u2264': '<=', '\u2265': '>=',
+    '\u221E': 'infinity',
+    // Check marks and crosses
+    '\u2713': '[v]', '\u2714': '[v]', '\u2715': '[x]', '\u2716': '[x]',
+    '\u2717': '[x]', '\u2718': '[x]',
+    // Copyright, trademark
+    '\u00A9': '(c)', '\u00AE': '(R)', '\u2122': '(TM)',
+  };
+  
+  for (const [unicode, ascii] of Object.entries(unicodeToAscii)) {
+    cleaned = cleaned.replace(new RegExp(unicode, 'g'), ascii);
+  }
+  
+  // Normalize bullet points to standard ASCII bullet or dash
+  const bulletChars = /[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u25B6\u25BA\u25C6\u25C7\u25D8\u25D9\u2605\u2606\u2666\u2756\u27A2\u29BF\u25A0\u25A1\u25AA\u25AB\u2B24\u26AB\u26AA●○◦◉◆◇▪▫★☆►▸◂◀]/g;
+  cleaned = cleaned.replace(bulletChars, '-');
+  
+  if (forPDF) {
+    // For PDF: Replace remaining non-ASCII with closest ASCII or remove
+    cleaned = cleaned
+      // Common accented characters to base letters
+      .replace(/[àáâãäå]/gi, match => match.toLowerCase() === match ? 'a' : 'A')
+      .replace(/[èéêë]/gi, match => match.toLowerCase() === match ? 'e' : 'E')
+      .replace(/[ìíîï]/gi, match => match.toLowerCase() === match ? 'i' : 'I')
+      .replace(/[òóôõö]/gi, match => match.toLowerCase() === match ? 'o' : 'O')
+      .replace(/[ùúûü]/gi, match => match.toLowerCase() === match ? 'u' : 'U')
+      .replace(/[ñ]/gi, match => match.toLowerCase() === match ? 'n' : 'N')
+      .replace(/[ç]/gi, match => match.toLowerCase() === match ? 'c' : 'C')
+      .replace(/[ß]/g, 'ss')
+      .replace(/[æ]/gi, 'ae')
+      .replace(/[œ]/gi, 'oe')
+      // Remove any remaining non-printable or non-ASCII characters
+      .replace(/[^\x20-\x7E\n\t]/g, '');
+  }
   
   // Fix spaced-out text (like "H e l l o" -> "Hello")
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 3; i++) {
     cleaned = cleaned
       .replace(/\b([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\b/g, '$1$2$3$4$5$6$7$8')
       .replace(/\b([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\b/g, '$1$2$3$4$5$6')
-      .replace(/\b([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\b/g, '$1$2$3$4')
-      .replace(/\b([A-Za-z])\s([A-Za-z])\s([A-Za-z])\b/g, '$1$2$3');
+      .replace(/\b([A-Za-z])\s([A-Za-z])\s([A-Za-z])\s([A-Za-z])\b/g, '$1$2$3$4');
   }
   
-  return cleaned.replace(/  +/g, ' ').trim();
+  // Clean up multiple spaces and trim
+  return cleaned.replace(/  +/g, ' ').replace(/\n\s*\n\s*\n/g, '\n\n').trim();
 }
 
 /**
@@ -187,10 +248,9 @@ async function extractGeminiContent() {
     
     line = cleanText(line);
     
-    // Normalize various bullet characters to standard bullet
-    line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u2713\u2714\u2715\u2716\u27A4\u25B6\u25BA●○◦◉◆◇▪▫★☆→➤➔►]\s*/g, '• ');
-    line = line.replace(/^\*\s+/g, '• '); // Markdown asterisk bullets
-    line = line.replace(/^-\s+/g, '• '); // Dash bullets
+    // Normalize various bullet characters to standard dash (ASCII safe)
+    line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u2713\u2714\u2715\u2716\u27A4\u25B6\u25BA●○◦◉◆◇▪▫★☆→➤➔►]\s*/g, '- ');
+    line = line.replace(/^\*\s+/g, '- '); // Markdown asterisk bullets
     
     if (line) {
       if (line.length > 50 || /^\d+\.\s+/.test(line) || /^•\s+/.test(line)) {
@@ -317,10 +377,9 @@ async function extractClaudeContent() {
     
     line = cleanText(line);
     
-    // Normalize various bullet characters to standard bullet
-    line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u2713\u2714\u2715\u2716\u27A4\u25B6\u25BA\u25cf\u25cb\u25e6\u25c9\u25c6\u25c7\u25aa\u25ab\u2605\u2606\u2192\u27a4\u2794\u25ba]\s*/g, '• ');
-    line = line.replace(/^\*\s+/g, '• '); // Markdown asterisk bullets
-    line = line.replace(/^-\s+/g, '• '); // Dash bullets
+    // Normalize various bullet characters to standard dash (ASCII safe)
+    line = line.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u2713\u2714\u2715\u2716\u27A4\u25B6\u25BA\u25cf\u25cb\u25e6\u25c9\u25c6\u25c7\u25aa\u25ab\u2605\u2606\u2192\u27a4\u2794\u25ba]\s*/g, '- ');
+    line = line.replace(/^\*\s+/g, '- '); // Markdown asterisk bullets
     
     if (line) {
       if (line.length > 50 || /^\d+\.\s+/.test(line) || /^•\s+/.test(line)) {
@@ -456,206 +515,324 @@ function generatePDFInContentScript(data) {
     const margin = 50;
     const contentWidth = pageWidth - margin * 2;
     let y = margin;
+    let pageNumber = 1;
     
+    // Helper: ensure space for content, add new page if needed
     const ensureSpace = (needed = 20) => {
-      if (y + needed > pageHeight - margin) {
+      if (y + needed > pageHeight - margin - 20) {
+        addPageFooter();
         pdf.addPage();
+        pageNumber++;
         y = margin;
+        return true;
       }
+      return false;
     };
     
-    // Title
-    pdf.setFont('helvetica', 'bold');
-    pdf.setFontSize(20);
-    pdf.setTextColor(0, 0, 0);
-    pdf.text(data.title, margin, y);
-    y += 25;
+    // Helper: add page footer with page number
+    const addPageFooter = () => {
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(9);
+      pdf.setTextColor(150, 150, 150);
+      const pageText = `Page ${pageNumber}`;
+      const textWidth = pdf.getTextWidth(pageText);
+      pdf.text(pageText, (pageWidth - textWidth) / 2, pageHeight - 25);
+    };
     
-    // Metadata
+    // Helper: sanitize text for PDF (ASCII only)
+    const sanitizeForPDF = (text) => cleanText(text, true);
+    
+    // ========== DOCUMENT HEADER ==========
+    
+    // Title
+    const safeTitle = sanitizeForPDF(data.title) || 'Chat Conversation';
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(22);
+    pdf.setTextColor(30, 30, 30);
+    const titleLines = pdf.splitTextToSize(safeTitle, contentWidth);
+    titleLines.forEach(line => {
+      pdf.text(line, margin, y);
+      y += 26;
+    });
+    y += 5;
+    
+    // Metadata line
     pdf.setFont('helvetica', 'normal');
     pdf.setFontSize(10);
     pdf.setTextColor(100, 100, 100);
-    pdf.text(`${data.date} • ${data.stats.total} messages • ${data.stats.words} words`, margin, y);
-    y += 15;
+    const metaText = `Exported: ${data.date}`;
+    pdf.text(metaText, margin, y);
+    y += 14;
     
-    // Separator
+    // Stats line
+    const statsText = `${data.stats.total} messages | ${data.stats.words} words | ${data.stats.user || 0} from user | ${data.stats.assistant || 0} from assistant`;
+    pdf.text(statsText, margin, y);
+    y += 20;
+    
+    // Decorative separator line
     pdf.setDrawColor(200, 200, 200);
+    pdf.setLineWidth(1);
     pdf.line(margin, y, pageWidth - margin, y);
-    y += 25;
+    y += 30;
     
-    // Process messages
-    for (const msg of data.messages) {
-      if (isGemini && msg.role === 'user') continue;
+    // ========== MESSAGE RENDERING ==========
+    
+    const lineHeight = 14;
+    const paragraphSpacing = 10;
+    const sectionSpacing = 20;
+    
+    for (let msgIdx = 0; msgIdx < data.messages.length; msgIdx++) {
+      const msg = data.messages[msgIdx];
+      if (!msg.text) continue;
       
-      let text = msg.text || '';
+      // Get sanitized text
+      let text = sanitizeForPDF(msg.text);
       if (!text) continue;
       
-      // Replace code placeholders
+      // Replace code placeholders with formatted markers
       if (msg.codeBlocks?.length) {
         msg.codeBlocks.forEach(b => {
-          text = text.replace(b.id, `\n[CODE: ${b.language}]\n${b.code}\n[/CODE]\n`);
+          const codeContent = sanitizeForPDF(b.code);
+          text = text.replace(b.id, `\n[CODE:${b.language.toUpperCase()}]\n${codeContent}\n[/CODE]\n`);
         });
       }
       
-      // Render text
-      const lines = text.split('\n');
-      const lineHeight = 14;
-      const fontSize = 11;
-      let inCode = false;
+      // Message role header
+      ensureSpace(40);
+      const roleLabel = msg.role === 'user' ? 'USER' : 'ASSISTANT';
+      const roleColor = msg.role === 'user' ? [16, 163, 127] : [139, 92, 246]; // Green for user, purple for AI
       
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
+      pdf.setFillColor(...roleColor);
+      pdf.roundedRect(margin, y - 12, 70, 18, 3, 3, 'F');
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(9);
+      pdf.setTextColor(255, 255, 255);
+      pdf.text(roleLabel, margin + 8, y);
+      y += 18;
+      
+      // Process text content
+      const lines = text.split('\n');
+      let inCode = false;
+      let codeLanguage = '';
+      
+      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+        let line = lines[lineIdx];
         
-        if (!line) { y += 8; continue; }
+        // Empty line = paragraph break
+        if (!line.trim()) {
+          y += paragraphSpacing;
+          continue;
+        }
         
-        ensureSpace(lineHeight + 10);
-        
-        // Headers
-        if (line.startsWith('## ')) {
-          y += 10;
+        // ---- HEADERS ----
+        // H1 style: # Header or ## Header
+        const h1Match = line.match(/^#{1,2}\s+(.+)$/);
+        if (h1Match) {
+          ensureSpace(30);
+          y += 8;
           pdf.setFont('helvetica', 'bold');
           pdf.setFontSize(14);
-          pdf.setTextColor(0, 0, 0);
-          pdf.text(line.replace(/^##\s*/, ''), margin, y);
-          y += 20;
-          pdf.setFontSize(fontSize);
           pdf.setTextColor(30, 30, 30);
+          const headerText = sanitizeForPDF(h1Match[1]);
+          const headerLines = pdf.splitTextToSize(headerText, contentWidth);
+          headerLines.forEach(hl => {
+            pdf.text(hl, margin, y);
+            y += 18;
+          });
+          y += 4;
+          // Underline for h1
+          pdf.setDrawColor(220, 220, 220);
+          pdf.line(margin, y - 8, margin + Math.min(pdf.getTextWidth(headerText), contentWidth), y - 8);
           continue;
         }
         
-        // Code start
-        if (line.startsWith('[CODE:')) {
-          inCode = true;
+        // H3 style: ### Header
+        const h3Match = line.match(/^#{3,}\s+(.+)$/);
+        if (h3Match) {
+          ensureSpace(25);
           y += 5;
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(12);
+          pdf.setTextColor(50, 50, 50);
+          const h3Lines = pdf.splitTextToSize(sanitizeForPDF(h3Match[1]), contentWidth);
+          h3Lines.forEach(hl => {
+            pdf.text(hl, margin, y);
+            y += 16;
+          });
+          continue;
+        }
+        
+        // ---- CODE BLOCKS ----
+        if (line.match(/^\[CODE:?([A-Z]*)\]$/i)) {
+          inCode = true;
+          codeLanguage = line.match(/^\[CODE:?([A-Z]*)\]$/i)?.[1] || 'CODE';
+          ensureSpace(30);
+          y += 5;
+          // Code header bar
+          pdf.setFillColor(60, 60, 60);
+          pdf.roundedRect(margin, y - 10, contentWidth, 18, 3, 3, 'F');
           pdf.setFont('courier', 'bold');
           pdf.setFontSize(9);
-          pdf.setTextColor(80, 80, 80);
-          pdf.text(line.replace('[CODE:', 'Code:').replace(']', ''), margin, y);
-          y += 12;
+          pdf.setTextColor(200, 200, 200);
+          pdf.text(codeLanguage || 'CODE', margin + 8, y + 2);
+          y += 16;
           continue;
         }
         
-        // Code end
-        if (line === '[/CODE]') {
+        if (line.match(/^\[\/CODE\]$/i)) {
           inCode = false;
-          pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(fontSize);
-          y += 8;
+          y += 10;
           continue;
         }
         
-        // Code content
         if (inCode) {
+          ensureSpace(14);
+          // Code background
           pdf.setFillColor(245, 245, 245);
-          pdf.rect(margin - 5, y - 10, contentWidth + 10, 14, 'F');
+          pdf.rect(margin, y - 10, contentWidth, 14, 'F');
           pdf.setFont('courier', 'normal');
           pdf.setFontSize(9);
-          pdf.setTextColor(20, 20, 20);
-          pdf.text(line.length > 85 ? line.substring(0, 85) + '...' : line, margin, y);
+          pdf.setTextColor(40, 40, 40);
+          // Truncate long lines
+          const codeLine = line.length > 90 ? line.substring(0, 87) + '...' : line;
+          pdf.text(codeLine, margin + 5, y);
           y += 12;
           continue;
         }
         
-        // Numbered list
-        const numMatch = line.match(/^(\d+)\.\s+(.*)$/);
+        // ---- NUMBERED LISTS ----
+        const numMatch = line.match(/^(\d+)\.\s+(.+)$/);
         if (numMatch) {
+          ensureSpace(lineHeight + 5);
           pdf.setFont('helvetica', 'bold');
-          pdf.setFontSize(fontSize);
-          pdf.setTextColor(30, 30, 30);
-          pdf.text(numMatch[1] + '.', margin, y);
+          pdf.setFontSize(11);
+          pdf.setTextColor(50, 50, 50);
+          const numLabel = numMatch[1] + '.';
+          pdf.text(numLabel, margin, y);
+          
           pdf.setFont('helvetica', 'normal');
-          
-          const wrapped = pdf.splitTextToSize(numMatch[2], contentWidth - 25);
-          wrapped.forEach((chunk, idx) => {
-            if (idx > 0) { y += lineHeight; ensureSpace(lineHeight); }
-            pdf.text(chunk, margin + 22, y);
-          });
-          y += lineHeight + 4;
-          continue;
-        }
-        
-        // Bullet points (expanded detection)
-        const bulletMatch = line.match(/^[•\-\*●○◦◉◆◇▪▫★☆→➤➔►]\s*(.*)$/);
-        if (bulletMatch) {
-          pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(fontSize);
-          pdf.setTextColor(30, 30, 30);
-          pdf.text('•', margin + 5, y);
-          
-          const wrapped = pdf.splitTextToSize(bulletMatch[1], contentWidth - 25);
-          wrapped.forEach((chunk, idx) => {
-            if (idx > 0) { y += lineHeight; ensureSpace(lineHeight); }
-            pdf.text(chunk, margin + 22, y);
-          });
-          y += lineHeight + 4;
-          continue;
-        }
-        
-        // Bold text handling
-        pdf.setFont('helvetica', 'normal');
-        pdf.setFontSize(fontSize);
-        pdf.setTextColor(30, 30, 30);
-        
-        if (line.includes('**')) {
-          // Parse and render with bold
-          let clean = '';
-          const boldRanges = [];
-          let i = 0, inBold = false, boldStart = 0;
-          
-          while (i < line.length) {
-            if (line.substring(i, i + 2) === '**') {
-              if (inBold) {
-                boldRanges.push({ start: boldStart, end: clean.length });
-                inBold = false;
-              } else {
-                boldStart = clean.length;
-                inBold = true;
-              }
-              i += 2;
-            } else {
-              clean += line[i];
-              i++;
+          pdf.setTextColor(40, 40, 40);
+          const numContent = sanitizeForPDF(numMatch[2]);
+          const numLines = pdf.splitTextToSize(numContent, contentWidth - 25);
+          numLines.forEach((nl, idx) => {
+            if (idx > 0) {
+              y += lineHeight;
+              ensureSpace(lineHeight);
             }
+            pdf.text(nl, margin + 22, y);
+          });
+          y += lineHeight + 3;
+          continue;
+        }
+        
+        // ---- BULLET POINTS ----
+        const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+        if (bulletMatch) {
+          ensureSpace(lineHeight + 5);
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(11);
+          pdf.setTextColor(40, 40, 40);
+          // Draw bullet dot
+          pdf.setFillColor(80, 80, 80);
+          pdf.circle(margin + 4, y - 3, 2, 'F');
+          
+          const bulletContent = sanitizeForPDF(bulletMatch[1]);
+          const bulletLines = pdf.splitTextToSize(bulletContent, contentWidth - 20);
+          bulletLines.forEach((bl, idx) => {
+            if (idx > 0) {
+              y += lineHeight;
+              ensureSpace(lineHeight);
+            }
+            pdf.text(bl, margin + 15, y);
+          });
+          y += lineHeight + 2;
+          continue;
+        }
+        
+        // ---- BOLD TEXT HANDLING ----
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(11);
+        pdf.setTextColor(40, 40, 40);
+        
+        // Check for bold markers **text**
+        if (line.includes('**')) {
+          const segments = [];
+          let remaining = line;
+          let isBold = false;
+          
+          while (remaining.length > 0) {
+            const boldIdx = remaining.indexOf('**');
+            if (boldIdx === -1) {
+              segments.push({ text: remaining, bold: isBold });
+              break;
+            }
+            if (boldIdx > 0) {
+              segments.push({ text: remaining.substring(0, boldIdx), bold: isBold });
+            }
+            isBold = !isBold;
+            remaining = remaining.substring(boldIdx + 2);
           }
           
-          const wrapped = pdf.splitTextToSize(clean, contentWidth);
-          let charIdx = 0;
+          // Render segments
+          const plainText = segments.map(s => s.text).join('');
+          const wrapped = pdf.splitTextToSize(plainText, contentWidth);
           
-          for (const chunk of wrapped) {
+          for (const wrapLine of wrapped) {
             ensureSpace(lineHeight);
             let x = margin;
+            let charPos = 0;
             
-            for (let c = 0; c < chunk.length; c++) {
-              const gIdx = charIdx + c;
-              const isBold = boldRanges.some(r => gIdx >= r.start && gIdx < r.end);
-              pdf.setFont('helvetica', isBold ? 'bold' : 'normal');
-              pdf.text(chunk[c], x, y);
-              x += pdf.getTextWidth(chunk[c]);
+            for (const seg of segments) {
+              pdf.setFont('helvetica', seg.bold ? 'bold' : 'normal');
+              for (let c = 0; c < seg.text.length && charPos < wrapLine.length; c++) {
+                if (seg.text[c] === wrapLine[charPos]) {
+                  pdf.text(wrapLine[charPos], x, y);
+                  x += pdf.getTextWidth(wrapLine[charPos]);
+                  charPos++;
+                }
+              }
             }
-            charIdx += chunk.length;
             y += lineHeight;
           }
-          pdf.setFont('helvetica', 'normal');
-        } else {
-          const wrapped = pdf.splitTextToSize(line, contentWidth);
-          wrapped.forEach(chunk => {
-            ensureSpace(lineHeight);
-            pdf.text(chunk, margin, y);
-            y += lineHeight;
-          });
+          continue;
         }
-        y += 4;
+        
+        // ---- REGULAR PARAGRAPH TEXT ----
+        ensureSpace(lineHeight);
+        const wrapped = pdf.splitTextToSize(line, contentWidth);
+        wrapped.forEach(chunk => {
+          ensureSpace(lineHeight);
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(11);
+          pdf.setTextColor(40, 40, 40);
+          pdf.text(chunk, margin, y);
+          y += lineHeight;
+        });
       }
-      y += 20;
+      
+      // Spacing between messages
+      y += sectionSpacing;
+      
+      // Add subtle separator between messages
+      if (msgIdx < data.messages.length - 1) {
+        ensureSpace(20);
+        pdf.setDrawColor(230, 230, 230);
+        pdf.setLineWidth(0.5);
+        const separatorWidth = 100;
+        pdf.line((pageWidth - separatorWidth) / 2, y - 10, (pageWidth + separatorWidth) / 2, y - 10);
+      }
     }
     
-    // Save
-    const filename = data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50) + '.pdf';
+    // Add footer to last page
+    addPageFooter();
+    
+    // Save the PDF
+    const filename = safeTitle.replace(/[^a-z0-9]/gi, '_').substring(0, 50) + '.pdf';
     pdf.save(filename);
-    console.log('✅ PDF saved:', filename);
+    console.log('PDF saved:', filename);
     
   } catch (error) {
-    console.error('❌ PDF error:', error);
+    console.error('PDF error:', error);
     alert('Error generating PDF: ' + error.message);
   }
 }
@@ -684,45 +861,441 @@ async function generatePDF(data) {
 // ============================================
 
 function downloadMarkdown(data) {
-  let md = `# ${data.title}\n\n`;
-  md += `**Date:** ${data.date} | **Messages:** ${data.stats.total} | **Words:** ${data.stats.words}\n\n---\n\n`;
-  data.messages.forEach(msg => {
-    md += `## ${msg.role === 'user' ? 'You' : 'Assistant'}\n\n${msg.text}\n\n---\n\n`;
+  // Create a properly formatted Markdown document
+  let md = '';
+  
+  // Document title with proper heading
+  md += `# ${data.title}\n\n`;
+  
+  // Metadata section
+  md += `> **Exported:** ${data.date}  \n`;
+  md += `> **Messages:** ${data.stats.total} (${data.stats.user || 0} from user, ${data.stats.assistant || 0} from assistant)  \n`;
+  md += `> **Word Count:** ${data.stats.words}\n\n`;
+  
+  // Separator
+  md += `---\n\n`;
+  
+  // Process each message
+  data.messages.forEach((msg, idx) => {
+    const roleEmoji = msg.role === 'user' ? '👤' : '🤖';
+    const roleLabel = msg.role === 'user' ? 'You' : 'Assistant';
+    
+    // Message header
+    md += `## ${roleEmoji} ${roleLabel}\n\n`;
+    
+    // Process message content
+    let text = msg.text || '';
+    
+    // Handle code blocks - replace placeholders with proper markdown code blocks
+    if (msg.codeBlocks?.length) {
+      msg.codeBlocks.forEach(block => {
+        text = text.replace(block.id, `\n\`\`\`${block.language}\n${block.code}\n\`\`\`\n`);
+      });
+    }
+    
+    // Format the text content
+    const lines = text.split('\n');
+    const formattedLines = [];
+    
+    for (const line of lines) {
+      let formattedLine = line;
+      
+      // Preserve existing headers
+      if (formattedLine.match(/^#{1,6}\s+/)) {
+        formattedLines.push(formattedLine);
+        continue;
+      }
+      
+      // Preserve code blocks
+      if (formattedLine.match(/^```/) || formattedLine.match(/^\s{4,}/)) {
+        formattedLines.push(formattedLine);
+        continue;
+      }
+      
+      // Normalize bullet points to markdown format
+      formattedLine = formattedLine.replace(/^[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25CB\u25B6\u25BA•●○◦◆◇▪▫★☆→➤➔►]\s*/g, '- ');
+      
+      // Ensure numbered lists have proper formatting
+      formattedLine = formattedLine.replace(/^(\d+)\)\s+/, '$1. ');
+      
+      formattedLines.push(formattedLine);
+    }
+    
+    md += formattedLines.join('\n');
+    md += '\n\n';
+    
+    // Add separator between messages (except after last one)
+    if (idx < data.messages.length - 1) {
+      md += `---\n\n`;
+    }
   });
   
-  const blob = new Blob([md], { type: 'text/markdown' });
+  // Footer
+  md += `\n---\n\n`;
+  md += `*Exported using AI Chat Exporter*\n`;
+  
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `${data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}.md`;
   a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 function downloadHTML(data) {
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>${data.title}</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:800px;margin:0 auto;padding:20px;background:#f7f7f8}
-.header{text-align:center;margin-bottom:30px;padding-bottom:20px;border-bottom:1px solid #e5e5e5}
-.stats{font-size:.9em;color:#666}
-.message{margin-bottom:20px;padding:15px;border-radius:8px}
-.user{background:#fff;border:1px solid #e5e5e5}
-.assistant{background:#f0f0f0}
-.role{font-weight:bold;margin-bottom:10px}
-.content{line-height:1.6;white-space:pre-wrap}
-</style></head><body>
-<div class="header"><h1>${data.title}</h1>
-<div class="stats">${data.date} • ${data.stats.total} messages • ${data.stats.words} words</div></div>
-${data.messages.map(m => `<div class="message ${m.role}">
-<div class="role">${m.role === 'user' ? 'You' : 'Assistant'}</div>
-<div class="content">${m.text.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</div>
-</div>`).join('')}
-</body></html>`;
+  // Create a professionally formatted HTML document
+  const escapeHTML = (str) => {
+    if (!str) return '';
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  };
   
-  const blob = new Blob([html], { type: 'text/html' });
+  // Process message text to HTML with proper formatting
+  const formatMessageHTML = (msg) => {
+    let text = msg.text || '';
+    
+    // Handle code blocks
+    if (msg.codeBlocks?.length) {
+      msg.codeBlocks.forEach(block => {
+        const escapedCode = escapeHTML(block.code);
+        text = text.replace(block.id, 
+          `<div class="code-block"><div class="code-header">${escapeHTML(block.language.toUpperCase())}</div><pre><code>${escapedCode}</code></pre></div>`
+        );
+      });
+    }
+    
+    // Split into lines and process
+    const lines = text.split('\n');
+    let html = '';
+    let inList = false;
+    let listType = '';
+    
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+      
+      // Empty line
+      if (!line.trim()) {
+        if (inList) {
+          html += listType === 'ul' ? '</ul>' : '</ol>';
+          inList = false;
+        }
+        html += '<br>';
+        continue;
+      }
+      
+      // Headers
+      const h1Match = line.match(/^#{1,2}\s+(.+)$/);
+      if (h1Match) {
+        if (inList) { html += listType === 'ul' ? '</ul>' : '</ol>'; inList = false; }
+        html += `<h3>${escapeHTML(h1Match[1])}</h3>`;
+        continue;
+      }
+      
+      const h3Match = line.match(/^#{3,}\s+(.+)$/);
+      if (h3Match) {
+        if (inList) { html += listType === 'ul' ? '</ul>' : '</ol>'; inList = false; }
+        html += `<h4>${escapeHTML(h3Match[1])}</h4>`;
+        continue;
+      }
+      
+      // Bullet points
+      const bulletMatch = line.match(/^[-*\u2022\u25CF\u25CB•●○]\s*(.+)$/);
+      if (bulletMatch) {
+        if (!inList || listType !== 'ul') {
+          if (inList) html += listType === 'ul' ? '</ul>' : '</ol>';
+          html += '<ul>';
+          inList = true;
+          listType = 'ul';
+        }
+        html += `<li>${formatInlineHTML(escapeHTML(bulletMatch[1]))}</li>`;
+        continue;
+      }
+      
+      // Numbered list
+      const numMatch = line.match(/^(\d+)[.)]\s*(.+)$/);
+      if (numMatch) {
+        if (!inList || listType !== 'ol') {
+          if (inList) html += listType === 'ul' ? '</ul>' : '</ol>';
+          html += '<ol>';
+          inList = true;
+          listType = 'ol';
+        }
+        html += `<li>${formatInlineHTML(escapeHTML(numMatch[2]))}</li>`;
+        continue;
+      }
+      
+      // Regular paragraph
+      if (inList) {
+        html += listType === 'ul' ? '</ul>' : '</ol>';
+        inList = false;
+      }
+      
+      // Check if line already contains HTML (from code block replacement)
+      if (line.includes('<div class="code-block">')) {
+        html += line;
+      } else {
+        html += `<p>${formatInlineHTML(escapeHTML(line))}</p>`;
+      }
+    }
+    
+    if (inList) {
+      html += listType === 'ul' ? '</ul>' : '</ol>';
+    }
+    
+    return html;
+  };
+  
+  // Format inline elements (bold, italic, code)
+  const formatInlineHTML = (text) => {
+    return text
+      // Bold: **text** or __text__
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/__(.+?)__/g, '<strong>$1</strong>')
+      // Italic: *text* or _text_
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/_([^_]+)_/g, '<em>$1</em>')
+      // Inline code: `code`
+      .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+  };
+  
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHTML(data.title)}</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      line-height: 1.6;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 40px 20px;
+      background: #fafafa;
+      color: #333;
+    }
+    
+    /* Document Header */
+    .document-header {
+      text-align: center;
+      margin-bottom: 40px;
+      padding-bottom: 30px;
+      border-bottom: 2px solid #e0e0e0;
+    }
+    
+    .document-header h1 {
+      font-size: 28px;
+      font-weight: 600;
+      color: #1a1a1a;
+      margin: 0 0 15px 0;
+    }
+    
+    .metadata {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 20px;
+      font-size: 14px;
+      color: #666;
+    }
+    
+    .metadata-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    
+    .metadata-item strong {
+      color: #444;
+    }
+    
+    /* Messages */
+    .message {
+      margin-bottom: 30px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      overflow: hidden;
+    }
+    
+    .message-header {
+      padding: 12px 20px;
+      font-weight: 600;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .message.user .message-header {
+      background: linear-gradient(135deg, #10a37f, #0d8a6a);
+      color: white;
+    }
+    
+    .message.assistant .message-header {
+      background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+      color: white;
+    }
+    
+    .message-content {
+      padding: 20px;
+    }
+    
+    .message-content p {
+      margin: 0 0 12px 0;
+    }
+    
+    .message-content p:last-child {
+      margin-bottom: 0;
+    }
+    
+    .message-content h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #1a1a1a;
+      margin: 20px 0 10px 0;
+      padding-bottom: 5px;
+      border-bottom: 1px solid #eee;
+    }
+    
+    .message-content h3:first-child {
+      margin-top: 0;
+    }
+    
+    .message-content h4 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #333;
+      margin: 15px 0 8px 0;
+    }
+    
+    /* Lists */
+    .message-content ul,
+    .message-content ol {
+      margin: 12px 0;
+      padding-left: 24px;
+    }
+    
+    .message-content li {
+      margin: 6px 0;
+    }
+    
+    /* Code */
+    .code-block {
+      margin: 15px 0;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #1e1e1e;
+    }
+    
+    .code-header {
+      background: #333;
+      color: #aaa;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    }
+    
+    .code-block pre {
+      margin: 0;
+      padding: 15px;
+      overflow-x: auto;
+    }
+    
+    .code-block code {
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 13px;
+      color: #d4d4d4;
+      line-height: 1.5;
+    }
+    
+    .inline-code {
+      background: #f0f0f0;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 0.9em;
+      color: #c7254e;
+    }
+    
+    /* Footer */
+    .document-footer {
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid #e0e0e0;
+      text-align: center;
+      font-size: 12px;
+      color: #999;
+    }
+    
+    /* Print styles */
+    @media print {
+      body {
+        background: white;
+        padding: 20px;
+      }
+      
+      .message {
+        box-shadow: none;
+        border: 1px solid #ddd;
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="document-header">
+    <h1>${escapeHTML(data.title)}</h1>
+    <div class="metadata">
+      <div class="metadata-item">
+        <span>📅</span>
+        <span>${escapeHTML(data.date)}</span>
+      </div>
+      <div class="metadata-item">
+        <span>💬</span>
+        <strong>${data.stats.total}</strong>
+        <span>messages</span>
+      </div>
+      <div class="metadata-item">
+        <span>📝</span>
+        <strong>${data.stats.words}</strong>
+        <span>words</span>
+      </div>
+    </div>
+  </div>
+  
+  <div class="messages">
+${data.messages.map(msg => `    <div class="message ${msg.role}">
+      <div class="message-header">
+        <span>${msg.role === 'user' ? '👤' : '🤖'}</span>
+        <span>${msg.role === 'user' ? 'You' : 'Assistant'}</span>
+      </div>
+      <div class="message-content">
+        ${formatMessageHTML(msg)}
+      </div>
+    </div>`).join('\n')}
+  </div>
+  
+  <div class="document-footer">
+    Exported using AI Chat Exporter
+  </div>
+</body>
+</html>`;
+  
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `${data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}.html`;
   a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // ============================================
