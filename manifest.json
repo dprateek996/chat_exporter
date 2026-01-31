@@ -14,12 +14,19 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["contextMenus"],
+  "permissions": ["contextMenus", "activeTab"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://claude.ai/*",
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://*.ggpht.com/*",
+    "https://*.gstatic.com/*",
+    "https://lh3.googleusercontent.com/*",
+    "https://files.oaiusercontent.com/*",
+    "https://*.openai.com/*",
+    "https://*.anthropic.com/*"
   ],
   "content_scripts": [
     {

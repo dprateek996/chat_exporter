@@ -48,4 +48,102 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     })();
     return true;
   }
+  
+  // Handle capturing a visible portion of the tab (for image elements)
+  if (request.type === 'CAPTURE_IMAGE_REGION') {
+    (async () => {
+      try {
+        const { rect, tabId } = request;
+        console.log('[ChatArchive BG] Capturing region:', rect);
+        
+        // Capture the visible tab
+        const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+        
+        // We need to crop the image to the specified region
+        // Send the full screenshot and region info back to content script to crop
+        sendResponse({ success: true, dataUrl, rect });
+      } catch (error) {
+        console.log('[ChatArchive BG] Capture error:', error.message);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+  
+  // Handle image fetching from background (has different permissions)
+  if (request.type === 'FETCH_IMAGE_BASE64') {
+    (async () => {
+      try {
+        const url = request.url;
+        const isGoogleImage = url.includes('googleusercontent') || url.includes('ggpht') || url.includes('lh3.google');
+        
+        console.log('[ChatArchive BG] Fetching image:', url.substring(0, 80));
+        console.log('[ChatArchive BG] Is Google image:', isGoogleImage);
+        
+        let response = null;
+        let lastError = null;
+        
+        // Try 1: cors mode without credentials (best for Google images)
+        if (!response) {
+          try {
+            console.log('[ChatArchive BG] Try 1: cors without credentials');
+            const resp = await fetch(url, {
+              credentials: 'omit',
+              mode: 'cors',
+              headers: { 'Accept': 'image/*' }
+            });
+            if (resp.ok) response = resp;
+            else lastError = `Status ${resp.status}`;
+          } catch (e) {
+            console.log('[ChatArchive BG] Try 1 failed:', e.message);
+            lastError = e.message;
+          }
+        }
+        
+        // Try 2: cors mode with credentials (for non-Google images that need auth)
+        if (!response && !isGoogleImage) {
+          try {
+            console.log('[ChatArchive BG] Try 2: cors with credentials');
+            const resp = await fetch(url, {
+              credentials: 'include',
+              mode: 'cors',
+              headers: { 'Accept': 'image/*' }
+            });
+            if (resp.ok) response = resp;
+            else lastError = `Status ${resp.status}`;
+          } catch (e) {
+            console.log('[ChatArchive BG] Try 2 failed:', e.message);
+            lastError = e.message;
+          }
+        }
+        
+        if (response && response.ok) {
+          const blob = await response.blob();
+          console.log('[ChatArchive BG] Got blob, size:', blob.size, 'type:', blob.type);
+          
+          if (blob.size < 100) {
+            sendResponse({ success: false, error: 'Blob too small (likely error response)' });
+            return;
+          }
+          
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            console.log('[ChatArchive BG] Converted to base64, length:', reader.result?.length);
+            sendResponse({ success: true, base64: reader.result });
+          };
+          reader.onerror = () => {
+            sendResponse({ success: false, error: 'FileReader error' });
+          };
+          reader.readAsDataURL(blob);
+        } else {
+          console.log('[ChatArchive BG] All fetch attempts failed');
+          sendResponse({ success: false, error: `Fetch failed: ${lastError || 'unknown'}` });
+        }
+      } catch (error) {
+        console.log('[ChatArchive BG] Error:', error.message);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true; // Required for async sendResponse
+  }
 });

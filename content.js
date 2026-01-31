@@ -71,6 +71,34 @@ const UI_PATTERNS = [
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
+ * Request blob image conversion from injected script (page context)
+ * This works because blob: URLs are context-specific
+ */
+async function fetchBlobImageViaInjected(blobUrl) {
+  return new Promise((resolve) => {
+    const requestId = 'blob_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    
+    const handler = (event) => {
+      if (event.source === window && 
+          event.data.type === 'BLOB_IMAGE_RESULT' && 
+          event.data.requestId === requestId) {
+        window.removeEventListener('message', handler);
+        resolve(event.data.base64);
+      }
+    };
+    
+    window.addEventListener('message', handler);
+    window.postMessage({ type: 'FETCH_BLOB_IMAGE', blobUrl, requestId }, '*');
+    
+    // Timeout after 5 seconds
+    setTimeout(() => {
+      window.removeEventListener('message', handler);
+      resolve(null);
+    }, 5000);
+  });
+}
+
+/**
  * Clean text by removing garbage characters and fixing spacing
  * Also sanitizes for PDF output (jsPDF only supports basic Latin characters)
  */
@@ -199,175 +227,1045 @@ async function extractGeminiContent() {
   
   const messages = [];
   
-  // Gemini Pro structure: conversation turns are in specific containers
-  // Look for the main conversation container
+  // Strategy: Gemini uses a turn-based structure
+  // User prompts and model responses are in separate containers
+  // We need to find BOTH and merge them in order
   
-  // Method 1: Find all conversation turns by looking for message containers
-  // Gemini typically uses data attributes or specific class patterns
-  
-  // Try to find user query containers and model response containers
   const conversationContainer = document.querySelector('main') || document.body;
   
-  // Gemini structures messages in turns - look for turn containers
-  // Common patterns: [class*="turn"], [class*="query"], [class*="response"]
-  const turnSelectors = [
-    '[class*="conversation-turn"]',
-    '[class*="query-content"]',
-    '[class*="response-container"]',
-    '[class*="message-wrapper"]',
-    '[class*="chat-message"]'
+  // Step 1: Find all user query elements
+  const userSelectors = [
+    '[class*="query-text"]',
+    '[class*="user-query"]', 
+    '[class*="prompt-text"]',
+    '[data-query]',
+    '.user-text',
+    'p[class*="query"]'
   ];
   
-  let foundTurns = [];
+  // Step 2: Find all model response elements  
+  const modelSelectors = [
+    '[class*="response-container"] .markdown',
+    '[class*="model-response"]',
+    '[class*="response-text"]',
+    '.markdown-main-panel',
+    '[class*="message-content"]'
+  ];
   
-  // First, try to find structured turns
-  for (const selector of turnSelectors) {
-    const elements = conversationContainer.querySelectorAll(selector);
-    if (elements.length > 0) {
-      foundTurns = Array.from(elements);
-      console.log(`Found ${foundTurns.length} turns with selector: ${selector}`);
-      break;
+  // Alternative: Look for turn containers that have both
+  const turnContainers = conversationContainer.querySelectorAll('[class*="conversation-container"] > div, [class*="chat-history"] > div');
+  
+  // Collect all message elements with position info
+  const allMessageData = [];
+  
+  // Method 1: Try to find explicit user/model containers
+  const findMessages = (selectors, role) => {
+    for (const selector of selectors) {
+      try {
+        const elements = conversationContainer.querySelectorAll(selector);
+        elements.forEach(el => {
+          const text = el.innerText?.trim();
+          if (text && text.length > 5 && !shouldFilterLine(text)) {
+            const rect = el.getBoundingClientRect();
+            allMessageData.push({
+              el,
+              text,
+              role,
+              top: rect.top + window.scrollY
+            });
+          }
+        });
+      } catch(e) {}
     }
-  }
+  };
   
-  // Method 2: If no structured turns, look for alternating user/model patterns
-  if (foundTurns.length === 0) {
-    // Look for elements that contain substantial text and are direct children of main areas
-    const allElements = conversationContainer.querySelectorAll('div[class]');
-    const candidates = [];
+  findMessages(userSelectors, 'user');
+  findMessages(modelSelectors, 'assistant');
+  
+  // Method 2: If we didn't find enough, use a smarter DOM walk
+  if (allMessageData.length < 2) {
+    allMessageData.length = 0; // Clear
     
-    for (const el of allElements) {
-      // Skip sidebar, nav, buttons
-      if (el.closest('nav, aside, header, footer, [class*="sidebar"], [class*="drawer"]')) continue;
-      if (el.querySelector('input, textarea')) continue;
+    // Look for the conversation structure more broadly
+    // Gemini typically alternates: user input -> model response
+    
+    // Find all substantial text blocks
+    const allBlocks = conversationContainer.querySelectorAll('div, p, article, section');
+    const processedTexts = new Set();
+    
+    for (const block of allBlocks) {
+      // Skip UI elements
+      if (block.closest('nav, aside, footer, header, [role="navigation"], [class*="sidebar"], [class*="drawer"]')) continue;
+      if (block.querySelector('input, textarea, button[type="submit"]')) continue;
       
-      const text = el.innerText?.trim();
-      if (!text || text.length < 20) continue;
+      const text = block.innerText?.trim();
+      if (!text || text.length < 15) continue;
       
-      // Check if this element has text that's not just from children
-      const directText = Array.from(el.childNodes)
-        .filter(n => n.nodeType === Node.TEXT_NODE)
-        .map(n => n.textContent.trim())
-        .join('');
+      // Skip if we already processed this text (parent-child overlap)
+      const textSig = text.substring(0, 100);
+      if (processedTexts.has(textSig)) continue;
       
-      const rect = el.getBoundingClientRect();
-      // Must be in main content area (not sidebar)
-      if (rect.width < 300) continue;
+      // Check if this is a "leaf" text container (no substantial children with same text)
+      const childTexts = Array.from(block.children).map(c => c.innerText?.trim()).join('');
+      // If children have most of the text, skip this container (we'll process children)
+      if (childTexts.length > text.length * 0.8 && block.children.length > 0) continue;
       
-      candidates.push({
-        el,
+      // Skip very short non-substantive text
+      if (shouldFilterLine(text)) continue;
+      
+      const rect = block.getBoundingClientRect();
+      if (rect.width < 200 || rect.height < 20) continue;
+      
+      // Determine role from classes
+      const classes = (block.className + ' ' + (block.parentElement?.className || '')).toLowerCase();
+      let role = 'unknown';
+      
+      if (classes.match(/user|query|prompt|human|input-/)) {
+        role = 'user';
+      } else if (classes.match(/model|response|assistant|output|answer|markdown/)) {
+        role = 'assistant';
+      }
+      
+      processedTexts.add(textSig);
+      allMessageData.push({
+        el: block,
         text,
-        top: rect.top + window.scrollY,
-        isUserLikely: text.length < 500 && !el.querySelector('pre, code, ul, ol')
+        role,
+        top: rect.top + window.scrollY
       });
     }
-    
-    // Sort by vertical position
-    candidates.sort((a, b) => a.top - b.top);
-    
-    // Deduplicate - remove elements whose text is contained in another
-    const uniqueCandidates = [];
-    for (const candidate of candidates) {
-      const isDuplicate = uniqueCandidates.some(existing => 
-        existing.text.includes(candidate.text) || candidate.text.includes(existing.text)
-      );
-      if (!isDuplicate && candidate.text.length > 30) {
-        uniqueCandidates.push(candidate);
-      }
-    }
-    
-    foundTurns = uniqueCandidates.map(c => c.el);
-    console.log(`Found ${foundTurns.length} candidate turns via fallback method`);
   }
   
-  // Process found turns
-  for (let i = 0; i < foundTurns.length; i++) {
-    const turn = foundTurns[i];
-    let text = turn.innerText?.trim() || '';
+  // Sort by vertical position
+  allMessageData.sort((a, b) => a.top - b.top);
+  
+  // Deduplicate overlapping messages (keep the one with more specific role)
+  const dedupedMessages = [];
+  for (const msg of allMessageData) {
+    let dominated = false;
     
-    if (!text || text.length < 10) continue;
-    
-    // Clean the text
-    text = cleanText(text, false);
-    
-    // Filter out UI elements
-    if (shouldFilterLine(text)) continue;
-    
-    // Determine if this is user or assistant
-    // Heuristics:
-    // - User messages are typically shorter
-    // - User messages don't have lists, code blocks, headers
-    // - Check for specific class names
-    let role = 'assistant';
-    
-    const className = turn.className?.toLowerCase() || '';
-    const parentClass = turn.parentElement?.className?.toLowerCase() || '';
-    
-    if (className.includes('user') || className.includes('query') || className.includes('human') ||
-        parentClass.includes('user') || parentClass.includes('query') || parentClass.includes('human')) {
-      role = 'user';
-    } else if (className.includes('model') || className.includes('response') || className.includes('assistant') ||
-               parentClass.includes('model') || parentClass.includes('response') || parentClass.includes('assistant')) {
-      role = 'assistant';
-    } else {
-      // Use heuristics: alternate, with first being user
-      // Or check content characteristics
-      const hasStructuredContent = turn.querySelector('pre, code, ul, ol, h1, h2, h3');
-      const isLong = text.length > 300;
+    for (let i = dedupedMessages.length - 1; i >= 0; i--) {
+      const existing = dedupedMessages[i];
       
-      if (hasStructuredContent || isLong) {
-        role = 'assistant';
-      } else if (messages.length === 0 || messages[messages.length - 1]?.role === 'assistant') {
-        role = 'user';
-      } else {
-        role = 'assistant';
+      // Check for text overlap
+      if (existing.text.includes(msg.text) || msg.text.includes(existing.text)) {
+        // Keep the one with known role, or the longer one
+        if (msg.role !== 'unknown' && existing.role === 'unknown') {
+          dedupedMessages[i] = msg;
+        } else if (msg.text.length > existing.text.length && msg.role !== 'unknown') {
+          dedupedMessages[i] = msg;
+        }
+        dominated = true;
+        break;
       }
     }
     
-    // Extract code blocks if present
-    const codeBlocks = [];
-    const codeElements = turn.querySelectorAll('pre code, pre');
-    codeElements.forEach((codeEl, idx) => {
-      const code = codeEl.innerText?.trim();
-      if (code && code.length > 10) {
-        const langClass = codeEl.className?.match(/language-(\w+)/);
-        const lang = langClass ? langClass[1] : 'code';
-        const id = `[CODE_${messages.length}_${idx}]`;
-        codeBlocks.push({ id, language: lang, code });
-        text = text.replace(code, id);
+    if (!dominated) {
+      dedupedMessages.push(msg);
+    }
+  }
+  
+  // Now assign roles based on alternation if unknown
+  // First message should be user (they asked something)
+  for (let i = 0; i < dedupedMessages.length; i++) {
+    const msg = dedupedMessages[i];
+    
+    if (msg.role === 'unknown') {
+      // Use heuristics
+      const hasStructure = msg.el.querySelector('pre, code, ul, ol, h1, h2, h3, table');
+      const isLong = msg.text.length > 400;
+      const prevRole = i > 0 ? dedupedMessages[i-1].role : null;
+      
+      if (hasStructure || isLong) {
+        msg.role = 'assistant';
+      } else if (i === 0 || prevRole === 'assistant') {
+        msg.role = 'user';
+      } else {
+        msg.role = 'assistant';
       }
+    }
+  }
+  
+  // Pre-scan: Find ALL user-uploaded images in the conversation to ensure none are missed
+  const allConversationImages = [];
+  const mainContainer = document.querySelector('main') || document.body;
+  const allGeminiImages = mainContainer.querySelectorAll('img[src*="googleusercontent"], img[src*="lh3.google"]');
+  console.log(`📷 Pre-scan: Found ${allGeminiImages.length} total Google images in conversation`);
+  
+  for (const img of allGeminiImages) {
+    // Filter out sidebar/nav images
+    if (img.closest('aside, nav, [role="navigation"], [class*="sidebar"], [class*="drawer"], [class*="header"]')) {
+      continue;
+    }
+    // Filter out tiny images
+    const rect = img.getBoundingClientRect();
+    if (rect.width < 50 || rect.height < 50) continue;
+    
+    allConversationImages.push({
+      img,
+      top: rect.top + window.scrollY,
+      src: img.src,
+      assigned: false
     });
+    console.log(`📷 Pre-scan: User image at Y=${(rect.top + window.scrollY).toFixed(0)}, src=${img.src.substring(0, 60)}`);
+  }
+  
+  // Build final messages array
+  for (const msg of dedupedMessages) {
+    const el = msg.el;
+    let text = cleanText(msg.text, false);
+    
+    // Extract code blocks
+    const codeBlocks = extractCodeBlocks(el, messages.length);
+    for (const cb of codeBlocks) {
+      text = text.replace(cb.code, cb.id);
+    }
+    
+    // Extract images - for user messages, look in the message element itself first
+    let images = await extractImages(el, msg.role);
+    
+    // For Gemini user messages, search more thoroughly for images
+    if (msg.role === 'user' && images.length === 0) {
+      console.log('📷 No images in direct element, searching parent containers...');
+      
+      // Search up to 6 levels of parents - don't require specific class names
+      // Just avoid going into sidebar/nav containers
+      let parent = el.parentElement;
+      for (let lvl = 0; lvl < 6 && parent && images.length === 0; lvl++) {
+        // Stop if we hit main, body, or navigation elements
+        if (parent.tagName === 'MAIN' || parent.tagName === 'BODY') break;
+        if (parent.closest('aside, nav, [role="navigation"], [class*="sidebar"]')) break;
+        
+        console.log(`📷 Checking parent level ${lvl}: <${parent.tagName}> class="${(parent.className || '').substring(0, 50)}"`);
+        images = await extractImages(parent, msg.role);
+        parent = parent.parentElement;
+      }
+    }
+    
+    // Also check for images in preceding siblings (Gemini sometimes puts image preview before text)
+    if (msg.role === 'user' && images.length === 0) {
+      console.log('📷 No images in parents, checking siblings...');
+      let prevSibling = el.previousElementSibling;
+      for (let i = 0; i < 5 && prevSibling; i++) {
+        // Check siblings that might contain images (don't require small text)
+        const siblingImages = await extractImages(prevSibling, msg.role);
+        if (siblingImages.length > 0) {
+          console.log(`📷 Found ${siblingImages.length} images in sibling ${i}`);
+          images.push(...siblingImages);
+          break;
+        }
+        prevSibling = prevSibling.previousElementSibling;
+      }
+    }
+    
+    // Last resort: check following siblings too
+    if (msg.role === 'user' && images.length === 0) {
+      let nextSibling = el.nextElementSibling;
+      for (let i = 0; i < 3 && nextSibling; i++) {
+        const siblingImages = await extractImages(nextSibling, msg.role);
+        if (siblingImages.length > 0) {
+          console.log(`📷 Found ${siblingImages.length} images in next sibling ${i}`);
+          images.push(...siblingImages);
+          break;
+        }
+        nextSibling = nextSibling.nextElementSibling;
+      }
+    }
+    
+    // FINAL fallback: Use pre-scanned images based on vertical position
+    // Assign images that are positioned just above this message element
+    if (msg.role === 'user' && images.length === 0 && allConversationImages.length > 0) {
+      const msgRect = el.getBoundingClientRect();
+      const msgTop = msgRect.top + window.scrollY;
+      
+      console.log(`📷 Fallback: Looking for pre-scanned images near msgTop=${msgTop.toFixed(0)}`);
+      
+      // Find images that are positioned within 300px above this message and not yet assigned
+      for (const imgData of allConversationImages) {
+        if (imgData.assigned) continue;
+        const diff = msgTop - imgData.top;
+        // Image should be above the message text (diff > 0) and within 300px
+        if (diff >= -50 && diff <= 300) {
+          console.log(`📷 Fallback: Assigning image at Y=${imgData.top.toFixed(0)} to message at Y=${msgTop.toFixed(0)} (diff=${diff.toFixed(0)})`);
+          // We need to capture this image
+          const capturedImages = await extractImages(imgData.img.parentElement, msg.role);
+          if (capturedImages.length > 0) {
+            images.push(...capturedImages);
+            imgData.assigned = true;
+          }
+        }
+      }
+    }
     
     messages.push({
-      role,
-      text: text.replace(/\n{3,}/g, '\n\n').trim(),
+      role: msg.role,
+      text: formatMessageText(text),
       codeBlocks,
-      images: []
+      images
     });
   }
   
-  // If still no messages, use fallback
+  // Fallback if nothing found
   if (messages.length === 0) {
-    console.log('Using full fallback extraction');
-    const main = document.querySelector('main');
-    if (main) {
-      const clone = main.cloneNode(true);
-      clone.querySelectorAll('nav, aside, [class*="sidebar"], [class*="drawer"], button, input, textarea').forEach(el => el.remove());
-      const text = cleanText(clone.innerText || '', false);
-      if (text.length > 50) {
-        messages.push({
-          role: 'assistant',
-          text,
-          codeBlocks: [],
-          images: []
-        });
-      }
+    console.log('Using full page fallback extraction');
+    const main = document.querySelector('main') || document.body;
+    const clone = main.cloneNode(true);
+    clone.querySelectorAll('nav, aside, [class*="sidebar"], button, input, textarea, svg').forEach(e => e.remove());
+    const text = cleanText(clone.innerText || '', false);
+    if (text.length > 50) {
+      messages.push({ role: 'assistant', text: formatMessageText(text), codeBlocks: [], images: [] });
     }
   }
   
-  console.log(`📊 Extracted ${messages.length} messages from Gemini`);
+  console.log(`📊 Extracted ${messages.length} messages from Gemini (${messages.filter(m=>m.role==='user').length} user, ${messages.filter(m=>m.role==='assistant').length} assistant)`);
   
   return { title, messages };
+}
+
+// Helper: Extract code blocks from an element
+function extractCodeBlocks(element, messageIndex) {
+  const codeBlocks = [];
+  const codeElements = element.querySelectorAll('pre');
+  
+  codeElements.forEach((pre, idx) => {
+    const codeEl = pre.querySelector('code') || pre;
+    const code = codeEl.innerText?.trim();
+    
+    if (code && code.length > 5) {
+      // Detect language
+      const langClass = codeEl.className?.match(/language-(\w+)/);
+      const headerEl = pre.previousElementSibling;
+      const headerLang = headerEl?.innerText?.toLowerCase().match(/^(javascript|python|java|typescript|html|css|bash|sh|sql|json|xml|c\+\+|c|ruby|go|rust|php|swift|kotlin)/);
+      
+      const lang = langClass?.[1] || headerLang?.[1] || 'code';
+      const id = `[CODE_BLOCK_${messageIndex}_${idx}]`;
+      
+      codeBlocks.push({ id, language: lang, code });
+    }
+  });
+  
+  return codeBlocks;
+}
+
+// Helper: Convert image to base64 data URL
+// Helper: Fetch image as base64 using multiple methods
+async function imageToBase64(imgElement) {
+  const src = imgElement.src;
+  
+  // Method 1: If already a data URL, return as-is
+  if (src.startsWith('data:')) {
+    return src;
+  }
+  
+  const isGoogleImage = src.includes('googleusercontent') || src.includes('ggpht') || src.includes('lh3.google');
+  
+  // Method 2: Try fetching the image directly (works for same-origin or CORS-enabled)
+  // For Google images, don't use credentials (they return Access-Control-Allow-Origin: *)
+  try {
+    const response = await fetch(src, { 
+      mode: 'cors', 
+      credentials: isGoogleImage ? 'omit' : 'include' 
+    });
+    if (response.ok) {
+      const blob = await response.blob();
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    }
+  } catch (e) {
+    console.log('Fetch method failed, trying canvas...', e.message);
+  }
+  
+  // Method 3: Try canvas approach with crossOrigin
+  try {
+    return await new Promise((resolve) => {
+      const tempImg = new Image();
+      tempImg.crossOrigin = 'anonymous';
+      
+      tempImg.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          
+          const width = tempImg.naturalWidth || tempImg.width || 300;
+          const height = tempImg.naturalHeight || tempImg.height || 200;
+          
+          // Limit max size
+          const maxDim = 800;
+          let finalWidth = width;
+          let finalHeight = height;
+          
+          if (width > maxDim || height > maxDim) {
+            const ratio = Math.min(maxDim / width, maxDim / height);
+            finalWidth = Math.floor(width * ratio);
+            finalHeight = Math.floor(height * ratio);
+          }
+          
+          canvas.width = finalWidth;
+          canvas.height = finalHeight;
+          
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, finalWidth, finalHeight);
+          ctx.drawImage(tempImg, 0, 0, finalWidth, finalHeight);
+          
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          resolve(dataUrl);
+        } catch (canvasError) {
+          console.warn('Canvas draw failed:', canvasError);
+          resolve(null);
+        }
+      };
+      
+      tempImg.onerror = () => {
+        console.warn('Image load failed for:', src);
+        resolve(null);
+      };
+      
+      // Add cache buster and try loading
+      tempImg.src = src + (src.includes('?') ? '&' : '?') + '_t=' + Date.now();
+      
+      // Timeout fallback
+      setTimeout(() => resolve(null), 5000);
+    });
+  } catch (e) {
+    console.warn('Canvas method failed:', e);
+  }
+  
+  // Method 4: Last resort - try original canvas without crossOrigin
+  try {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    const width = imgElement.naturalWidth || imgElement.width || 300;
+    const height = imgElement.naturalHeight || imgElement.height || 200;
+    
+    const maxDim = 800;
+    let finalWidth = width;
+    let finalHeight = height;
+    
+    if (width > maxDim || height > maxDim) {
+      const ratio = Math.min(maxDim / width, maxDim / height);
+      finalWidth = Math.floor(width * ratio);
+      finalHeight = Math.floor(height * ratio);
+    }
+    
+    canvas.width = finalWidth;
+    canvas.height = finalHeight;
+    
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, finalWidth, finalHeight);
+    ctx.drawImage(imgElement, 0, 0, finalWidth, finalHeight);
+    
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } catch (e) {
+    console.warn('Final canvas attempt failed:', e);
+    return null;
+  }
+}
+
+// Helper: Extract images from an element (improved for Gemini, Claude, ChatGPT)
+async function extractImages(element, role = 'user') {
+  const images = [];
+  
+  // Platform detection
+  const isGeminiPage = window.location.hostname.includes('gemini.google.com');
+  const isClaudePage = window.location.hostname.includes('claude.ai');
+  const isChatGPTPage = window.location.hostname.includes('chatgpt.com') || window.location.hostname.includes('chat.openai.com');
+  
+  const foundImages = new Set();
+  
+  // ===== GEMINI-SPECIFIC IMAGE DETECTION =====
+  if (isGeminiPage) {
+    // First, check if element is in the main conversation area (not sidebar/nav)
+    const isInConversation = element.closest('main') && !element.closest('aside, nav, [role="navigation"], [class*="sidebar"], [class*="drawer"]');
+    
+    if (isInConversation) {
+      // Gemini user uploads: Look for images with lh3.googleusercontent.com URLs
+      // These are typically in img elements with "upload" or "preview" in alt text
+      const geminiImgs = element.querySelectorAll('img[src*="googleusercontent"], img[src*="lh3.google"]');
+      geminiImgs.forEach(img => {
+        // Verify it's NOT in sidebar/nav/profile section
+        if (img.closest('aside, nav, [role="navigation"], [class*="sidebar"], [class*="drawer"], [class*="header"], [class*="profile"], [class*="avatar"]')) {
+          return; // Skip this image
+        }
+        // Verify it's a substantial image, not a tiny thumbnail
+        const w = img.naturalWidth || img.width || img.offsetWidth || 0;
+        const h = img.naturalHeight || img.height || img.offsetHeight || 0;
+        if (w >= 50 || h >= 50) {
+          foundImages.add(img);
+        }
+      });
+      
+      // Also look for images with specific Gemini upload classes/patterns
+      const uploadImgs = element.querySelectorAll('img[alt*="Uploaded"], img[alt*="Image of"], img[class*="upload"], img[class*="preview"]');
+      uploadImgs.forEach(img => {
+        // Verify it's NOT in sidebar/nav/profile section
+        if (img.closest('aside, nav, [role="navigation"], [class*="sidebar"], [class*="drawer"], [class*="header"], [class*="profile"], [class*="avatar"]')) {
+          return; // Skip this image
+        }
+        const src = img.src || '';
+        // Only include if it's a real image (not a base64 icon or data uri icon)
+        if (src.includes('googleusercontent') || src.includes('lh3.google') || (src.startsWith('http') && !src.includes('icon'))) {
+          foundImages.add(img);
+        }
+      });
+    }
+  }
+  
+  // ===== CLAUDE-SPECIFIC IMAGE DETECTION =====
+  if (isClaudePage) {
+    // Claude uses blob: URLs for uploaded images
+    const claudeImgs = element.querySelectorAll('img[src^="blob:"], img[src*="claude"], img[class*="upload"]');
+    claudeImgs.forEach(img => foundImages.add(img));
+    
+    // Also check for images in file preview containers
+    const previewContainers = element.querySelectorAll('[class*="file-preview"], [class*="attachment"]');
+    previewContainers.forEach(container => {
+      const imgs = container.querySelectorAll('img');
+      imgs.forEach(img => foundImages.add(img));
+    });
+  }
+  
+  // ===== CHATGPT-SPECIFIC IMAGE DETECTION =====
+  if (isChatGPTPage) {
+    // ChatGPT uses oaiusercontent.com or blob URLs
+    const gptImgs = element.querySelectorAll('img[src*="oaiusercontent"], img[src^="blob:"], img[src*="openai"]');
+    gptImgs.forEach(img => foundImages.add(img));
+    
+    // Also check for DALL-E generated images
+    const dalleImgs = element.querySelectorAll('img[alt*="DALL"], img[alt*="Generated"]');
+    dalleImgs.forEach(img => foundImages.add(img));
+  }
+  
+  // ===== GENERIC FALLBACK =====
+  // If no platform-specific images found, use generic approach
+  if (foundImages.size === 0) {
+    const genericSelectors = [
+      'img[src^="http"]:not([src*="icon"]):not([src*="logo"]):not([src*="avatar"]):not([width="16"]):not([width="24"])',
+      'img[class*="upload"]',
+      'img[class*="attachment"]',
+      'img[class*="preview"]'
+    ];
+    
+    for (const selector of genericSelectors) {
+      try {
+        const imgs = element.querySelectorAll(selector);
+        imgs.forEach(img => {
+          const w = img.naturalWidth || img.width || 0;
+          const h = img.naturalHeight || img.height || 0;
+          // Only include substantial images
+          if (w >= 80 || h >= 80) {
+            foundImages.add(img);
+          }
+        });
+      } catch(e) {}
+    }
+  }
+  
+  // Log what we found for debugging
+  console.log(`📷 Found ${foundImages.size} potential images in element (role=${role})`);
+  for (const img of foundImages) {
+    const src = img.src || '';
+    const alt = img.alt || '';
+    const rect = img.getBoundingClientRect();
+    const inMain = !!img.closest('main');
+    const inAside = !!img.closest('aside, nav, [class*="sidebar"]');
+    console.log(`📷 - Image: alt="${alt.substring(0, 40)}" inMain=${inMain} inAside=${inAside} rect=${rect.width.toFixed(0)}x${rect.height.toFixed(0)} src=${src.substring(0, 80)}`);
+  }
+  
+  // Helper function to capture image via tab screenshot
+  async function captureImageViaScreenshot(imgElement) {
+    if (!imgElement) {
+      console.log('📷 Screenshot method - no imgElement');
+      return null;
+    }
+    if (imgElement._isBackgroundImage) {
+      console.log('📷 Screenshot method - skipping background image');
+      return null;
+    }
+    
+    try {
+      // First check if image has valid dimensions
+      let rect = imgElement.getBoundingClientRect();
+      console.log('📷 Screenshot method - initial rect:', rect.width.toFixed(0), 'x', rect.height.toFixed(0), 'at', rect.x.toFixed(0), ',', rect.y.toFixed(0));
+      
+      if (rect.width < 10 || rect.height < 10) {
+        console.log('📷 Screenshot method - image too small:', rect.width, 'x', rect.height);
+        return null;
+      }
+      
+      // Check if image is outside viewport - if so, scroll it into view
+      const isOutsideViewport = rect.bottom < 0 || rect.top > window.innerHeight || 
+                                 rect.right < 0 || rect.left > window.innerWidth;
+      
+      if (isOutsideViewport) {
+        console.log('📷 Screenshot method - scrolling image into view...');
+        
+        // Scroll image into view with some padding
+        imgElement.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+        
+        // Wait for scroll to complete and rendering to settle
+        await new Promise(r => setTimeout(r, 200));
+        
+        // Get updated rect after scroll
+        rect = imgElement.getBoundingClientRect();
+        console.log('📷 Screenshot method - rect after scroll:', rect.width.toFixed(0), 'x', rect.height.toFixed(0), 'at', rect.x.toFixed(0), ',', rect.y.toFixed(0));
+        
+        // Check if now visible
+        if (rect.bottom < 0 || rect.top > window.innerHeight || 
+            rect.right < 0 || rect.left > window.innerWidth) {
+          console.log('📷 Screenshot method - image still not visible after scroll');
+          return null;
+        }
+      }
+      
+      console.log('📷 Screenshot method - capturing image at:', rect.x.toFixed(0), rect.y.toFixed(0), rect.width.toFixed(0), rect.height.toFixed(0));
+      
+      // Request screenshot from background
+      const response = await new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          { 
+            type: 'CAPTURE_IMAGE_REGION', 
+            rect: {
+              x: Math.max(0, rect.x),
+              y: Math.max(0, rect.y),
+              width: Math.min(rect.width, window.innerWidth - rect.x),
+              height: Math.min(rect.height, window.innerHeight - rect.y)
+            }
+          },
+          (resp) => {
+            if (chrome.runtime.lastError) {
+              console.log('📷 Screenshot method error:', chrome.runtime.lastError.message);
+              resolve(null);
+            } else {
+              resolve(resp);
+            }
+          }
+        );
+        setTimeout(() => resolve(null), 5000);
+      });
+      
+      if (!response || !response.success || !response.dataUrl) {
+        console.log('📷 Screenshot capture failed:', response?.error);
+        return null;
+      }
+      
+      // Crop the screenshot to the image region
+      const screenRect = response.rect;
+      const devicePixelRatio = window.devicePixelRatio || 1;
+      
+      return new Promise((resolve) => {
+        const tempImg = new Image();
+        tempImg.onload = () => {
+          try {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Calculate crop region (accounting for device pixel ratio)
+            const cropX = screenRect.x * devicePixelRatio;
+            const cropY = screenRect.y * devicePixelRatio;
+            const cropW = screenRect.width * devicePixelRatio;
+            const cropH = screenRect.height * devicePixelRatio;
+            
+            canvas.width = Math.min(cropW, 800);
+            canvas.height = Math.min(cropH, 600);
+            
+            ctx.drawImage(
+              tempImg,
+              cropX, cropY, cropW, cropH,  // source
+              0, 0, canvas.width, canvas.height  // destination
+            );
+            
+            const result = canvas.toDataURL('image/jpeg', 0.85);
+            console.log('📷 Screenshot cropped successfully, size:', result.length);
+            resolve(result);
+          } catch (e) {
+            console.log('📷 Screenshot crop failed:', e.message);
+            resolve(null);
+          }
+        };
+        tempImg.onerror = () => resolve(null);
+        tempImg.src = response.dataUrl;
+      });
+    } catch (e) {
+      console.log('📷 Screenshot method error:', e.message);
+      return null;
+    }
+  }
+  
+  // Save original scroll position to restore after capturing all images
+  const originalScrollY = window.scrollY;
+  const originalScrollX = window.scrollX;
+  
+  for (const img of foundImages) {
+    const src = img.src || img._isBackgroundImage && img.src;
+    if (!src) continue;
+    
+    const alt = img.alt || 'Uploaded image';
+    
+    // Skip hidden images
+    const computedStyle = window.getComputedStyle(img);
+    if (computedStyle.display === 'none' || computedStyle.visibility === 'hidden' || computedStyle.opacity === '0') {
+      console.log('📷 Skipping hidden image');
+      continue;
+    }
+    
+    // Get accurate dimensions
+    const rect = img.getBoundingClientRect();
+    const width = img.naturalWidth || img.width || rect.width || 0;
+    const height = img.naturalHeight || img.height || rect.height || 0;
+    
+    // Skip tiny icons and logos (more strict - 50px minimum)
+    if (width > 0 && width < 50 && height > 0 && height < 50) {
+      console.log('📷 Skipping tiny image:', width, 'x', height);
+      continue;
+    }
+    
+    // Skip known icon patterns in URL
+    if (src.includes('/icon') || src.includes('favicon') || src.includes('/logo')) continue;
+    
+    // Skip profile pictures and avatars (check class and alt text)
+    const parentClasses = (img.parentElement?.className || '').toLowerCase();
+    const imgClasses = (img.className || '').toLowerCase();
+    const altLower = alt.toLowerCase();
+    
+    if (imgClasses.match(/avatar|profile/) || parentClasses.match(/avatar|profile/) || altLower.match(/^avatar|^profile pic/)) {
+      console.log('📷 Skipping avatar/profile image');
+      continue;
+    }
+    
+    // Skip images that are clearly UI decorations (very small or specific patterns)
+    // But allow Google's lh3 images which are user uploads
+    const isUserUpload = src.includes('googleusercontent') || src.includes('lh3.google') || src.includes('ggpht');
+    
+    if (!isUserUpload) {
+      // Only apply strict filtering to non-user-upload images
+      if ((width > 0 && width < 80) || (height > 0 && height < 80)) {
+        console.log('📷 Skipping small decorative image:', width, 'x', height);
+        continue;
+      }
+    }
+    
+    console.log('📷 Attempting to capture image:', alt, src.substring(0, 80));
+    
+    let base64 = null;
+    const isGoogleImage = src.includes('googleusercontent') || src.includes('ggpht') || src.includes('lh3.google');
+    
+    // Method 0: For Google images, try screenshot capture first (most reliable)
+    if (!base64 && isGoogleImage && !img._isBackgroundImage && chrome?.runtime?.sendMessage) {
+      console.log('📷 Method 0: Trying screenshot capture for Google image...');
+      base64 = await captureImageViaScreenshot(img);
+      if (base64) console.log('📷 Method 0 (screenshot) succeeded!');
+    }
+    
+    // Method 1: For Google images, try fetch WITHOUT credentials first (CORS uses * which conflicts with credentials)
+    if (!base64 && isGoogleImage) {
+      console.log('📷 Method 1: Trying fetch without credentials for Google image...');
+      try {
+        // First try without following redirects to avoid CORS issues with redirect chain
+        let fetchUrl = src;
+        
+        // Try to get the final URL by doing a HEAD request first
+        try {
+          const headResp = await fetch(src, { 
+            method: 'HEAD',
+            mode: 'cors',
+            credentials: 'omit',
+            redirect: 'follow'
+          });
+          if (headResp.ok) {
+            fetchUrl = headResp.url; // Use the final URL after redirects
+            console.log('📷 Method 1: Final URL after redirect:', fetchUrl.substring(0, 80));
+          }
+        } catch (e) {
+          console.log('📷 Method 1: HEAD request failed, using original URL');
+        }
+        
+        const response = await fetch(fetchUrl, { 
+          mode: 'cors',
+          credentials: 'omit',
+          headers: { 'Accept': 'image/*' }
+        });
+        if (response.ok) {
+          const blob = await response.blob();
+          base64 = await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(blob);
+          });
+          if (base64) console.log('📷 Method 1 succeeded!');
+        }
+      } catch (e) {
+        console.log('📷 Method 1 failed:', e.message);
+      }
+    }
+    
+    // Method 2: Try using page context to capture the image (works for already-loaded images)
+    if (!base64 && (isGemini || isClaude)) {
+      console.log('📷 Method 2: Trying page context canvas capture...');
+      try {
+        // First try to find the image by src (handle URL with special chars)
+        const escapedSrc = src.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/'/g, "\\'");
+        // Also try partial match for truncated URLs
+        const srcPrefix = src.substring(0, Math.min(src.length, 100));
+        const escapedPrefix = srcPrefix.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/'/g, "\\'");
+        
+        base64 = await new Promise((resolve) => {
+          const requestId = 'canvas_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+          
+          const handler = (event) => {
+            if (event.data && event.data.type === 'PAGE_CANVAS_RESULT' && event.data.requestId === requestId) {
+              window.removeEventListener('message', handler);
+              resolve(event.data.base64);
+            }
+          };
+          window.addEventListener('message', handler);
+          
+          // Inject script that runs in page context where the image was loaded
+          const script = document.createElement('script');
+          script.textContent = `
+            (function() {
+              try {
+                // Try exact match first
+                let img = document.querySelector('img[src="${escapedSrc}"]');
+                
+                // If not found, try partial match
+                if (!img) {
+                  const imgs = document.querySelectorAll('img');
+                  for (const i of imgs) {
+                    if (i.src && i.src.startsWith("${escapedPrefix}")) {
+                      img = i;
+                      break;
+                    }
+                  }
+                }
+                
+                // Also try images with googleusercontent in src
+                if (!img) {
+                  const imgs = document.querySelectorAll('img[src*="googleusercontent"], img[src*="ggpht"]');
+                  if (imgs.length > 0) img = imgs[0];
+                }
+                
+                console.log('[ChatArchive] Page canvas - found image:', !!img, img?.src?.substring(0,50));
+                
+                if (img && img.complete && img.naturalWidth > 0) {
+                  const canvas = document.createElement('canvas');
+                  const ctx = canvas.getContext('2d');
+                  const maxDim = 800;
+                  let w = img.naturalWidth, h = img.naturalHeight;
+                  if (w > maxDim || h > maxDim) {
+                    const ratio = Math.min(maxDim / w, maxDim / h);
+                    w = Math.floor(w * ratio);
+                    h = Math.floor(h * ratio);
+                  }
+                  canvas.width = w;
+                  canvas.height = h;
+                  ctx.drawImage(img, 0, 0, w, h);
+                  try {
+                    const data = canvas.toDataURL('image/jpeg', 0.85);
+                    console.log('[ChatArchive] Page canvas - success, data length:', data?.length);
+                    window.postMessage({ type: 'PAGE_CANVAS_RESULT', requestId: '${requestId}', base64: data }, '*');
+                  } catch(canvasErr) {
+                    console.warn('[ChatArchive] Page canvas toDataURL failed (tainted):', canvasErr.message);
+                    window.postMessage({ type: 'PAGE_CANVAS_RESULT', requestId: '${requestId}', base64: null }, '*');
+                  }
+                } else {
+                  console.log('[ChatArchive] Page canvas - image not found or not loaded');
+                  window.postMessage({ type: 'PAGE_CANVAS_RESULT', requestId: '${requestId}', base64: null }, '*');
+                }
+              } catch(e) {
+                console.warn('[ChatArchive] Page canvas capture error:', e);
+                window.postMessage({ type: 'PAGE_CANVAS_RESULT', requestId: '${requestId}', base64: null }, '*');
+              }
+            })();
+          `;
+          document.head.appendChild(script);
+          script.remove();
+          
+          setTimeout(() => {
+            window.removeEventListener('message', handler);
+            resolve(null);
+          }, 3000);
+        });
+        
+        if (base64) console.log('📷 Method 2 (page context canvas) succeeded!');
+      } catch (e) {
+        console.log('📷 Method 2 failed:', e.message);
+      }
+    }
+    
+    // Method 3: Standard imageToBase64 for non-Google images
+    if (!base64 && !img._isBackgroundImage && img.complete && img.naturalWidth > 0) {
+      console.log('📷 Method 3: Trying standard imageToBase64...');
+      base64 = await imageToBase64(img);
+      if (base64) console.log('📷 Method 3 succeeded!');
+    }
+    
+    // Method 4: For blob URLs, try fetch with credentials
+    if (!base64 && src.startsWith('blob:')) {
+      console.log('📷 Method 4: Trying blob fetch with credentials...');
+      try {
+        const response = await fetch(src, { 
+          mode: 'cors', 
+          credentials: 'include',
+          headers: { 'Accept': 'image/*' }
+        });
+        if (response.ok) {
+          const blob = await response.blob();
+          base64 = await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(blob);
+          });
+          if (base64) console.log('📷 Method 4 succeeded!');
+        }
+      } catch (e) {
+        console.log('📷 Method 4 failed:', e.message);
+      }
+    }
+    
+    // Method 5: Try direct canvas capture from existing element
+    if (!base64 && !img._isBackgroundImage && img.complete) {
+      console.log('📷 Method 5: Trying direct canvas...');
+      try {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const w = img.naturalWidth || img.width || 300;
+        const h = img.naturalHeight || img.height || 200;
+        canvas.width = Math.min(w, 800);
+        canvas.height = Math.min(h, 600);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        base64 = canvas.toDataURL('image/png', 0.9);
+        if (base64) console.log('📷 Method 5 succeeded!');
+      } catch (e) {
+        console.log('📷 Method 5 failed (tainted):', e.message);
+      }
+    }
+    
+    // Method 6: Try fetching through background script (different permissions)
+    if (!base64 && !src.startsWith('blob:') && chrome?.runtime?.sendMessage) {
+      console.log('📷 Method 6: Trying background script fetch...');
+      try {
+        const result = await new Promise((resolve) => {
+          chrome.runtime.sendMessage(
+            { type: 'FETCH_IMAGE_BASE64', url: src },
+            (response) => {
+              if (chrome.runtime.lastError) {
+                console.log('📷 Method 6 runtime error:', chrome.runtime.lastError.message);
+                resolve(null);
+              } else if (response && response.success) {
+                resolve(response.base64);
+              } else {
+                console.log('📷 Method 6 response error:', response?.error);
+                resolve(null);
+              }
+            }
+          );
+          setTimeout(() => resolve(null), 5000);
+        });
+        if (result) {
+          base64 = result;
+          console.log('📷 Method 6 succeeded!');
+        }
+      } catch (e) {
+        console.log('📷 Method 6 failed:', e.message);
+      }
+    }
+    
+    // Method 7: For blob URLs in Gemini/Claude, inject inline script to fetch in page context
+    if (!base64 && src.startsWith('blob:') && (isGemini || isClaude)) {
+      console.log('📷 Method 7: Trying inline script for blob...');
+      try {
+        base64 = await new Promise((resolve) => {
+          const requestId = 'blob_' + Date.now();
+          
+          const handler = (event) => {
+            if (event.data && event.data.type === 'INLINE_IMAGE_RESULT' && event.data.requestId === requestId) {
+              window.removeEventListener('message', handler);
+              resolve(event.data.base64);
+            }
+          };
+          window.addEventListener('message', handler);
+          
+          const script = document.createElement('script');
+          script.textContent = `
+            (async function() {
+              try {
+                const response = await fetch("${src}");
+                if (response.ok) {
+                  const blob = await response.blob();
+                  const reader = new FileReader();
+                  reader.onloadend = () => {
+                    window.postMessage({ type: 'INLINE_IMAGE_RESULT', requestId: '${requestId}', base64: reader.result }, '*');
+                  };
+                  reader.onerror = () => {
+                    window.postMessage({ type: 'INLINE_IMAGE_RESULT', requestId: '${requestId}', base64: null }, '*');
+                  };
+                  reader.readAsDataURL(blob);
+                } else {
+                  window.postMessage({ type: 'INLINE_IMAGE_RESULT', requestId: '${requestId}', base64: null }, '*');
+                }
+              } catch(e) {
+                window.postMessage({ type: 'INLINE_IMAGE_RESULT', requestId: '${requestId}', base64: null }, '*');
+              }
+            })();
+          `;
+          document.head.appendChild(script);
+          script.remove();
+          
+          setTimeout(() => {
+            window.removeEventListener('message', handler);
+            resolve(null);
+          }, 5000);
+        });
+        
+        if (base64) console.log('📷 Method 7 succeeded!');
+      } catch (e) {
+        console.log('📷 Method 7 failed:', e.message);
+      }
+    }
+    
+    console.log('📷 Image capture result:', alt, base64 ? 'SUCCESS' : 'FAILED (will show placeholder)');
+    
+    images.push({ 
+      src, 
+      alt: alt === 'Uploaded image preview' ? 'Uploaded Image' : alt,
+      width: img.naturalWidth || img.width || 300, 
+      height: img.naturalHeight || img.height || 200,
+      base64: base64
+    });
+  }
+  
+  // Restore original scroll position
+  window.scrollTo(originalScrollX, originalScrollY);
+  
+  // Deduplicate images by source URL (keeping the first occurrence)
+  const seenUrls = new Set();
+  const dedupedImages = images.filter(img => {
+    // Normalize URL for comparison (strip query params and trailing slashes)
+    const normalizedUrl = img.src.split('?')[0].replace(/\/+$/, '').substring(0, 100);
+    if (seenUrls.has(normalizedUrl)) {
+      console.log('📷 Skipping duplicate image:', normalizedUrl.substring(0, 50));
+      return false;
+    }
+    seenUrls.add(normalizedUrl);
+    return true;
+  });
+  
+  return dedupedImages;
+}
+
+// Helper: Format message text properly
+function formatMessageText(text) {
+  return text
+    .replace(/\n{3,}/g, '\n\n')  // Max 2 newlines
+    .replace(/^\s+|\s+$/g, '')   // Trim
+    .replace(/[ \t]+$/gm, '');   // Remove trailing spaces per line
 }
 
 // Legacy function kept for compatibility
@@ -422,197 +1320,212 @@ async function extractClaudeContent() {
   
   const messages = [];
   
-  // Claude's DOM structure: look for human and assistant message containers
-  // Claude typically separates messages clearly with role indicators
-  
   const conversationContainer = document.querySelector('main') || document.body;
   
-  // Method 1: Look for message containers with role attributes
-  // Claude often uses data-* attributes or specific class patterns
-  const messageSelectors = [
-    '[data-testid*="message"]',
-    '[class*="message-row"]',
-    '[class*="human-message"], [class*="assistant-message"]',
-    '[class*="user-message"], [class*="ai-message"]',
-    'div[class*="Message"]'
+  // Claude's DOM structure analysis:
+  // - User messages and Claude responses are in distinct containers
+  // - We need to find the conversation thread
+  
+  // Collect all message data with positions
+  const allMessageData = [];
+  
+  // Method 1: Look for specific Claude message patterns
+  // Claude often uses classes like "font-claude-message" or data attributes
+  
+  const claudeSpecificSelectors = [
+    // Human messages
+    { selector: '[class*="human"]', role: 'user' },
+    { selector: '[class*="user-message"]', role: 'user' },
+    { selector: '[data-testid*="human"]', role: 'user' },
+    // Assistant messages  
+    { selector: '[class*="assistant-message"]', role: 'assistant' },
+    { selector: '[class*="claude-message"]', role: 'assistant' },
+    { selector: '[data-testid*="assistant"]', role: 'assistant' },
+    { selector: '.font-claude-message', role: 'assistant' }
   ];
   
-  let messageElements = [];
-  
-  for (const selector of messageSelectors) {
-    const elements = conversationContainer.querySelectorAll(selector);
-    if (elements.length > 0) {
-      messageElements = Array.from(elements);
-      console.log(`Found ${messageElements.length} messages with selector: ${selector}`);
-      break;
-    }
+  for (const { selector, role } of claudeSpecificSelectors) {
+    try {
+      const elements = conversationContainer.querySelectorAll(selector);
+      elements.forEach(el => {
+        const text = el.innerText?.trim();
+        if (text && text.length > 10 && !shouldFilterLine(text)) {
+          const rect = el.getBoundingClientRect();
+          allMessageData.push({
+            el,
+            text,
+            role,
+            top: rect.top + window.scrollY,
+            source: 'specific'
+          });
+        }
+      });
+    } catch(e) {}
   }
   
-  // Method 2: Look for the conversation structure by finding grouped content
-  if (messageElements.length === 0) {
-    // Claude typically has a consistent structure - look for parent containers
-    // that hold both the role indicator and content
-    const allDivs = conversationContainer.querySelectorAll('div');
-    const candidates = [];
+  // Method 2: If specific selectors didn't find much, do a DOM walk
+  if (allMessageData.length < 2) {
+    allMessageData.length = 0;
+    
+    // Find conversation thread containers
+    const allDivs = conversationContainer.querySelectorAll('div[class]');
+    const processedRects = [];
     
     for (const div of allDivs) {
-      // Skip sidebar, nav, buttons, inputs
-      if (div.closest('nav, aside, header, footer, [class*="sidebar"]')) continue;
+      // Skip UI elements
+      if (div.closest('nav, aside, footer, header, [role="navigation"], [class*="sidebar"], [class*="toolbar"]')) continue;
       if (div.querySelector('input, textarea')) continue;
       
       const text = div.innerText?.trim();
       if (!text || text.length < 15) continue;
       
+      // Skip pure UI text
+      if (shouldFilterLine(text)) continue;
+      
       const rect = div.getBoundingClientRect();
-      // Must be in main content area
-      if (rect.width < 400) continue;
+      if (rect.width < 300 || rect.height < 30) continue;
       
-      // Check for role indicators in parent or self
-      const fullClass = (div.className + ' ' + (div.parentElement?.className || '')).toLowerCase();
-      const hasRoleIndicator = fullClass.includes('human') || fullClass.includes('user') || 
-                               fullClass.includes('assistant') || fullClass.includes('claude') ||
-                               fullClass.includes('message');
+      // Check if we already have a container at similar position (dedup)
+      const isDuplicatePosition = processedRects.some(r => 
+        Math.abs(r.top - rect.top) < 20 && Math.abs(r.height - rect.height) < 20
+      );
+      if (isDuplicatePosition) continue;
       
-      if (hasRoleIndicator || text.length > 100) {
-        candidates.push({
-          el: div,
-          text,
-          top: rect.top + window.scrollY,
-          className: fullClass
-        });
+      // Get class hierarchy
+      const selfClass = (div.className || '').toLowerCase();
+      const parentClass = (div.parentElement?.className || '').toLowerCase();
+      const gpClass = (div.parentElement?.parentElement?.className || '').toLowerCase();
+      const allClasses = selfClass + ' ' + parentClass + ' ' + gpClass;
+      
+      // Determine role from class names
+      let role = 'unknown';
+      if (allClasses.match(/human|user(?!-select)/)) {
+        role = 'user';
+      } else if (allClasses.match(/assistant|claude|ai-response|response-content/)) {
+        role = 'assistant';
       }
+      
+      // Skip if no role indicator and text is too short (likely UI)
+      if (role === 'unknown' && text.length < 50) continue;
+      
+      processedRects.push(rect);
+      allMessageData.push({
+        el: div,
+        text,
+        role,
+        top: rect.top + window.scrollY,
+        source: 'walk'
+      });
     }
-    
-    // Sort by vertical position
-    candidates.sort((a, b) => a.top - b.top);
-    
-    // Deduplicate - prefer shorter containers (more specific)
-    const uniqueCandidates = [];
-    const seenTexts = new Set();
-    
-    for (const candidate of candidates) {
-      // Create a signature from first/last 50 chars
-      const sig = (candidate.text.slice(0, 50) + candidate.text.slice(-50)).toLowerCase();
-      
-      // Check if this text is a substring of existing or vice versa
-      let isDuplicate = false;
-      for (const existing of uniqueCandidates) {
-        if (existing.text.includes(candidate.text) || candidate.text.includes(existing.text)) {
-          // Keep the more specific (shorter) one if it's substantial
-          if (candidate.text.length < existing.text.length && candidate.text.length > 30) {
-            existing.text = candidate.text;
-            existing.el = candidate.el;
-          }
-          isDuplicate = true;
-          break;
-        }
-      }
-      
-      if (!isDuplicate && !seenTexts.has(sig) && candidate.text.length > 20) {
-        seenTexts.add(sig);
-        uniqueCandidates.push(candidate);
-      }
-    }
-    
-    messageElements = uniqueCandidates.map(c => c.el);
-    console.log(`Found ${messageElements.length} candidate messages via fallback`);
   }
   
-  // Process found messages
-  for (let i = 0; i < messageElements.length; i++) {
-    const msgEl = messageElements[i];
-    let text = msgEl.innerText?.trim() || '';
+  // Sort by vertical position
+  allMessageData.sort((a, b) => a.top - b.top);
+  
+  // Deduplicate overlapping texts
+  const dedupedMessages = [];
+  for (const msg of allMessageData) {
+    let dominated = false;
     
-    if (!text || text.length < 10) continue;
-    
-    // Clean the text
-    text = cleanText(text, false);
-    
-    // Filter out pure UI elements
-    if (shouldFilterLine(text)) continue;
-    if (/^(Copy|Retry|Continue|Edit|Share)$/i.test(text.split('\n')[0])) continue;
-    
-    // Determine role
-    let role = 'assistant';
-    
-    const className = (msgEl.className || '').toLowerCase();
-    const parentClass = (msgEl.parentElement?.className || '').toLowerCase();
-    const grandParentClass = (msgEl.parentElement?.parentElement?.className || '').toLowerCase();
-    const allClasses = className + ' ' + parentClass + ' ' + grandParentClass;
-    
-    // Check for explicit role indicators
-    if (allClasses.includes('human') || allClasses.includes('user')) {
-      role = 'user';
-    } else if (allClasses.includes('assistant') || allClasses.includes('claude') || allClasses.includes('ai-')) {
-      role = 'assistant';
-    } else {
-      // Use heuristics
-      const hasStructuredContent = msgEl.querySelector('pre, code, ul, ol, h1, h2, h3, table');
-      const isLong = text.length > 400;
-      const hasMultipleParagraphs = (text.match(/\n\n/g) || []).length >= 2;
+    for (let i = dedupedMessages.length - 1; i >= 0; i--) {
+      const existing = dedupedMessages[i];
       
-      if (hasStructuredContent || isLong || hasMultipleParagraphs) {
-        role = 'assistant';
-      } else if (messages.length === 0 || messages[messages.length - 1]?.role === 'assistant') {
-        role = 'user';
-      } else {
-        role = 'assistant';
+      // Check for text overlap
+      const overlapCheck = (a, b) => {
+        if (a.length > b.length) return a.includes(b);
+        return b.includes(a);
+      };
+      
+      if (overlapCheck(existing.text, msg.text)) {
+        // Keep the one with known role, or longer text if both have role
+        if (msg.role !== 'unknown' && existing.role === 'unknown') {
+          dedupedMessages[i] = msg;
+        } else if (msg.role !== 'unknown' && msg.text.length > existing.text.length) {
+          dedupedMessages[i] = msg;
+        }
+        dominated = true;
+        break;
       }
     }
     
-    // Extract code blocks
-    const codeBlocks = [];
-    const codeElements = msgEl.querySelectorAll('pre code, pre');
-    codeElements.forEach((codeEl, idx) => {
-      const code = codeEl.innerText?.trim();
-      if (code && code.length > 10) {
-        const langMatch = codeEl.className?.match(/language-(\w+)/);
-        const lang = langMatch ? langMatch[1] : 'code';
-        const id = `[CODE_${messages.length}_${idx}]`;
-        codeBlocks.push({ id, language: lang, code });
-        // Replace code in text with placeholder
-        text = text.replace(code, id);
+    if (!dominated) {
+      dedupedMessages.push(msg);
+    }
+  }
+  
+  // Assign roles to unknowns using alternation and heuristics
+  for (let i = 0; i < dedupedMessages.length; i++) {
+    const msg = dedupedMessages[i];
+    
+    if (msg.role === 'unknown') {
+      const hasStructure = msg.el.querySelector('pre, code, ul, ol, h1, h2, h3, table, blockquote');
+      const isLong = msg.text.length > 350;
+      const hasMarkdown = msg.text.includes('```') || msg.text.match(/^\s*[-*]\s+/m);
+      const prevRole = i > 0 ? dedupedMessages[i-1].role : null;
+      
+      if (hasStructure || isLong || hasMarkdown) {
+        msg.role = 'assistant';
+      } else if (i === 0 || prevRole === 'assistant') {
+        msg.role = 'user';
+      } else {
+        msg.role = 'assistant';
       }
-    });
+    }
+  }
+  
+  // Build final messages array
+  for (const msg of dedupedMessages) {
+    const el = msg.el;
+    let text = cleanText(msg.text, false);
+    
+    // Skip if text became empty after cleaning
+    if (!text || text.length < 5) continue;
+    
+    // Skip UI-only messages
+    if (/^(Copy|Retry|Continue|Edit|Share|View more|Show less)$/i.test(text.trim())) continue;
+    
+    // Extract code blocks using helper
+    const codeBlocks = extractCodeBlocks(el, messages.length);
+    for (const cb of codeBlocks) {
+      text = text.replace(cb.code, cb.id);
+    }
+    
+    // Extract images (async to capture base64)
+    const images = await extractImages(el);
     
     messages.push({
-      role,
-      text: text.replace(/\n{3,}/g, '\n\n').trim(),
+      role: msg.role,
+      text: formatMessageText(text),
       codeBlocks,
-      images: []
+      images
     });
   }
   
-  // Fallback: if no structured messages found, try to split by patterns
+  // Fallback if nothing found
   if (messages.length === 0) {
     console.log('Using full fallback extraction for Claude');
-    const main = document.querySelector('main');
-    if (main) {
-      const clone = main.cloneNode(true);
-      clone.querySelectorAll('nav, aside, [class*="sidebar"], button, input, textarea, svg').forEach(el => el.remove());
-      const text = cleanText(clone.innerText || '', false);
+    const main = document.querySelector('main') || document.body;
+    const clone = main.cloneNode(true);
+    clone.querySelectorAll('nav, aside, [class*="sidebar"], button, input, textarea, svg').forEach(e => e.remove());
+    const text = cleanText(clone.innerText || '', false);
+    
+    if (text.length > 50) {
+      // Try to split by turn indicators
+      const turnPattern = /(?:^|\n\n)(?:(?:Human|You|User):\s*|(?:Assistant|Claude):\s*)/gi;
+      const parts = text.split(turnPattern).filter(p => p.trim());
       
-      if (text.length > 50) {
-        // Try to split by "Human:" and "Assistant:" patterns if present
-        const parts = text.split(/(?:^|\n)(?:Human|You|User):\s*/i);
-        if (parts.length > 1) {
-          for (let i = 1; i < parts.length; i++) {
-            const assistantSplit = parts[i].split(/\n(?:Assistant|Claude):\s*/i);
-            if (assistantSplit.length >= 2) {
-              messages.push({ role: 'user', text: assistantSplit[0].trim(), codeBlocks: [], images: [] });
-              messages.push({ role: 'assistant', text: assistantSplit[1].trim(), codeBlocks: [], images: [] });
-            } else {
-              messages.push({ role: 'user', text: parts[i].trim(), codeBlocks: [], images: [] });
-            }
-          }
-        } else {
-          messages.push({ role: 'assistant', text, codeBlocks: [], images: [] });
+      if (parts.length > 1) {
+        for (let i = 0; i < parts.length; i++) {
+          const role = (i % 2 === 0) ? 'user' : 'assistant';
+          messages.push({ role, text: parts[i].trim(), codeBlocks: [], images: [] });
         }
+      } else {
+        messages.push({ role: 'assistant', text: formatMessageText(text), codeBlocks: [], images: [] });
       }
     }
   }
   
-  console.log(`📊 Extracted ${messages.length} messages from Claude`);
+  console.log(`📊 Extracted ${messages.length} messages from Claude (${messages.filter(m=>m.role==='user').length} user, ${messages.filter(m=>m.role==='assistant').length} assistant)`);
   
   return { title, messages };
 }
@@ -644,6 +1557,19 @@ async function extractChatGPTContent() {
       
       let text = '';
       const codeBlocks = [];
+      const images = [];
+      
+      // Extract images first
+      contentNode.querySelectorAll('img:not([class*="icon"]):not([class*="avatar"])').forEach((img, imgIdx) => {
+        if (img.src && (img.naturalWidth > 50 || !img.complete)) {
+          images.push({
+            src: img.src,
+            alt: img.alt || `Image ${imgIdx + 1}`,
+            width: img.naturalWidth,
+            height: img.naturalHeight
+          });
+        }
+      });
       
       clone.childNodes.forEach(node => {
         if (node.nodeType === Node.TEXT_NODE) {
@@ -658,14 +1584,14 @@ async function extractChatGPTContent() {
             const codeEl = node.querySelector('code');
             const code = (codeEl || node).innerText.trim();
             const lang = (codeEl?.className.match(/language-(\w+)/) || [])[1] || 'code';
-            const id = `[CODE_${codeBlocks.length}]`;
+            const id = `[CODE_BLOCK_${codeBlocks.length}]`;
             codeBlocks.push({ id, language: lang, code });
             text += '\n' + id + '\n';
           } else if (['h1','h2','h3','h4'].includes(tag)) {
             text += '\n## ' + content + '\n';
           } else if (tag === 'ul' || tag === 'ol') {
             node.querySelectorAll('li').forEach((li, idx) => {
-              text += (tag === 'ol' ? `${idx+1}. ` : '• ') + li.innerText.trim() + '\n';
+              text += (tag === 'ol' ? `${idx+1}. ` : '- ') + li.innerText.trim() + '\n';
             });
           } else {
             text += content + '\n';
@@ -675,7 +1601,7 @@ async function extractChatGPTContent() {
       
       text = cleanText(text);
       if (text) {
-        messages.push({ role, text, codeBlocks, images: [] });
+        messages.push({ role, text, codeBlocks, images });
       }
     }
   });
@@ -712,7 +1638,7 @@ async function extractConversation() {
 }
 
 // ============================================
-// PDF GENERATION
+// PDF GENERATION - Professional Document Style
 // ============================================
 
 function generatePDFInContentScript(data) {
@@ -725,327 +1651,569 @@ function generatePDFInContentScript(data) {
     const pdf = new jsPDFLib({ orientation: 'portrait', unit: 'pt', format: 'a4' });
     const pageWidth = pdf.internal.pageSize.getWidth();
     const pageHeight = pdf.internal.pageSize.getHeight();
-    const margin = 50;
-    const contentWidth = pageWidth - margin * 2;
-    let y = margin;
+    const marginLeft = 40;
+    const marginRight = 40;
+    const marginTop = 40;
+    const marginBottom = 40;
+    const contentWidth = pageWidth - marginLeft - marginRight;
+    let y = marginTop;
     let pageNumber = 1;
     
-    // Helper: ensure space for content, add new page if needed
+    // Premium color palette
+    const colors = {
+      aiText: [17, 24, 39],         // #111827 - Off-black for AI
+      userText: [31, 41, 55],       // #1F2937 - Darker gray for user
+      userBg: [243, 244, 246],      // #F3F4F6 - User bubble background
+      aiBg: [255, 255, 255],        // #FFFFFF - AI bubble background
+      aiBorder: [229, 231, 235],    // #E5E7EB - AI bubble border
+      codeBg: [249, 250, 251],      // #F9FAFB - Code background
+      codeBorder: [229, 231, 235],  // #E5E7EB - Code border
+      headingText: [0, 0, 0],       // Pure black for headings
+      meta: [156, 163, 175]         // #9CA3AF - Muted metadata
+    };
+    
+    // Typography with proper vertical rhythm
+    const font = {
+      body: 10,
+      bodyLine: 16,         // 1.6x line height for readability
+      heading1: 14,         // Semibold 14pt for main headings
+      heading1Line: 19,
+      heading2: 12,
+      heading2Line: 17,
+      heading3: 11,
+      heading3Line: 15,
+      code: 8.5,
+      codeLine: 12,
+      meta: 8
+    };
+    
+    // Semantic spacing (vertical rhythm)
+    const spacing = {
+      headingMarginTop: 18,    // margin: 18px 0 8px 0 for headings
+      headingMarginBottom: 8,
+      paragraphMarginBottom: 12,  // margin-bottom: 12px for paragraphs
+      listMarginBottom: 12,       // margin-bottom: 12px for lists
+      listItemMarginBottom: 6,    // margin-bottom: 6px for list items
+      codeMarginY: 12,            // margin: 12px 0 for code blocks
+      bubbleGap: 24               // margin-bottom: 24px between bubbles
+    };
+    
+    // Bubble settings
+    const bubble = {
+      maxWidth: contentWidth * 0.80,  // 80% max-width
+      padding: 16,                     // 16px vertical padding
+      paddingH: 24,                    // 24px horizontal padding
+      radius: 16,                      // 16px border-radius
+      userTailRadius: 4,               // border-bottom-right-radius: 4px
+      aiTailRadius: 4                  // border-bottom-left-radius: 4px
+    };
+    
+    const platform = isGemini ? 'Gemini' : (isClaude ? 'Claude' : (isChatGPT ? 'ChatGPT' : 'AI'));
+    
+    // ========== HELPERS ==========
+    
     const ensureSpace = (needed = 20) => {
-      if (y + needed > pageHeight - margin - 20) {
-        addPageFooter();
+      if (y + needed > pageHeight - marginBottom) {
         pdf.addPage();
         pageNumber++;
-        y = margin;
+        y = marginTop;
         return true;
       }
       return false;
     };
     
-    // Helper: add page footer with page number
-    const addPageFooter = () => {
-      pdf.setFont('helvetica', 'normal');
-      pdf.setFontSize(9);
-      pdf.setTextColor(150, 150, 150);
-      const pageText = `Page ${pageNumber}`;
-      const textWidth = pdf.getTextWidth(pageText);
-      pdf.text(pageText, (pageWidth - textWidth) / 2, pageHeight - 25);
+    const sanitize = (text) => cleanText(text, true);
+    
+    // Draw rounded bubble with chat tail effect
+    const drawBubble = (x, bubbleY, w, h, isUser = false) => {
+      const r = bubble.radius;
+      
+      if (isUser) {
+        // User bubble - #F3F4F6 background, tail on bottom-right
+        pdf.setFillColor(...colors.userBg);
+        pdf.roundedRect(x, bubbleY, w, h, r, r, 'F');
+        // Sharper bottom-right corner (tail effect)
+        pdf.setFillColor(...colors.userBg);
+        pdf.rect(x + w - bubble.userTailRadius, bubbleY + h - bubble.userTailRadius, bubble.userTailRadius, bubble.userTailRadius, 'F');
+      } else {
+        // AI bubble - white with #E5E7EB border, tail on bottom-left
+        pdf.setFillColor(...colors.aiBg);
+        pdf.setDrawColor(...colors.aiBorder);
+        pdf.setLineWidth(1);
+        pdf.roundedRect(x, bubbleY, w, h, r, r, 'FD');
+        // Sharper bottom-left corner (tail effect)
+        pdf.setFillColor(...colors.aiBg);
+        pdf.rect(x, bubbleY + h - bubble.aiTailRadius, bubble.aiTailRadius, bubble.aiTailRadius, 'F');
+        // Redraw border edges for tail
+        pdf.setDrawColor(...colors.aiBorder);
+        pdf.line(x, bubbleY + h - bubble.aiTailRadius, x, bubbleY + h);
+        pdf.line(x, bubbleY + h, x + bubble.aiTailRadius, bubbleY + h);
+      }
     };
     
-    // Helper: sanitize text for PDF (ASCII only)
-    const sanitizeForPDF = (text) => cleanText(text, true);
+    // Parse **bold** markers
+    const parseBold = (text) => {
+      const parts = [];
+      let rest = text;
+      let bold = false;
+      while (rest.length > 0) {
+        const idx = rest.indexOf('**');
+        if (idx === -1) {
+          if (rest) parts.push({ text: rest, bold });
+          break;
+        }
+        if (idx > 0) parts.push({ text: rest.substring(0, idx), bold });
+        bold = !bold;
+        rest = rest.substring(idx + 2);
+      }
+      return parts;
+    };
+    
+    // Render text with inline bold - returns height used
+    const renderBoldText = (text, x, maxW, color, fontSize, lineH, startY) => {
+      let localY = startY;
+      
+      if (!text.includes('**')) {
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(fontSize);
+        pdf.setTextColor(...color);
+        const lines = pdf.splitTextToSize(text, maxW);
+        lines.forEach(l => {
+          pdf.text(l, x, localY);
+          localY += lineH;
+        });
+        return localY - startY;
+      }
+      
+      const parts = parseBold(text);
+      const plain = parts.map(p => p.text).join('');
+      pdf.setFontSize(fontSize);
+      const wrapped = pdf.splitTextToSize(plain, maxW);
+      
+      for (const line of wrapped) {
+        let cx = x;
+        let ci = 0;
+        for (const part of parts) {
+          pdf.setFont('helvetica', part.bold ? 'bold' : 'normal');
+          pdf.setFontSize(fontSize);
+          pdf.setTextColor(...color);
+          let seg = '';
+          for (let i = 0; i < part.text.length && ci < line.length; i++) {
+            if (part.text[i] === line[ci]) {
+              seg += line[ci];
+              ci++;
+            }
+          }
+          if (seg) {
+            pdf.text(seg, cx, localY);
+            cx += pdf.getTextWidth(seg);
+          }
+        }
+        localY += lineH;
+      }
+      return localY - startY;
+    };
     
     // ========== DOCUMENT HEADER ==========
     
-    // Title
-    const safeTitle = sanitizeForPDF(data.title) || 'Chat Conversation';
+    const safeTitle = sanitize(data.title) || 'Conversation';
+    
     pdf.setFont('helvetica', 'bold');
-    pdf.setFontSize(22);
-    pdf.setTextColor(30, 30, 30);
+    pdf.setFontSize(16);
+    pdf.setTextColor(...colors.aiText);
     const titleLines = pdf.splitTextToSize(safeTitle, contentWidth);
     titleLines.forEach(line => {
-      pdf.text(line, margin, y);
-      y += 26;
+      pdf.text(line, marginLeft, y);
+      y += 22;
     });
-    y += 5;
     
-    // Metadata line
+    y += 2;
     pdf.setFont('helvetica', 'normal');
-    pdf.setFontSize(10);
-    pdf.setTextColor(100, 100, 100);
-    const metaText = `Exported: ${data.date}`;
-    pdf.text(metaText, margin, y);
+    pdf.setFontSize(font.meta);
+    pdf.setTextColor(...colors.meta);
+    const msgCount = data.stats?.total || data.messages.length;
+    pdf.text(`${platform} • ${data.date} • ${msgCount} messages`, marginLeft, y);
+    
     y += 14;
+    pdf.setDrawColor(...colors.aiBorder);
+    pdf.setLineWidth(0.5);
+    pdf.line(marginLeft, y, pageWidth - marginRight, y);
+    y += 24;
     
-    // Stats line
-    const statsText = `${data.stats.total} messages | ${data.stats.words} words | ${data.stats.user || 0} from user | ${data.stats.assistant || 0} from assistant`;
-    pdf.text(statsText, margin, y);
-    y += 20;
-    
-    // Decorative separator line
-    pdf.setDrawColor(200, 200, 200);
-    pdf.setLineWidth(1);
-    pdf.line(margin, y, pageWidth - margin, y);
-    y += 30;
-    
-    // ========== MESSAGE RENDERING ==========
-    
-    const lineHeight = 14;
-    const paragraphSpacing = 10;
-    const sectionSpacing = 20;
+    // ========== MESSAGES - CONTINUOUS FLOW ==========
     
     for (let msgIdx = 0; msgIdx < data.messages.length; msgIdx++) {
       const msg = data.messages[msgIdx];
-      if (!msg.text) continue;
+      if (!msg.text && (!msg.images || msg.images.length === 0)) continue;
       
-      // Get sanitized text
-      let text = sanitizeForPDF(msg.text);
-      if (!text) continue;
+      let text = sanitize(msg.text) || '';
       
-      // Replace code placeholders with formatted markers
+      // Replace code block placeholders
       if (msg.codeBlocks?.length) {
         msg.codeBlocks.forEach(b => {
-          const codeContent = sanitizeForPDF(b.code);
-          text = text.replace(b.id, `\n[CODE:${b.language.toUpperCase()}]\n${codeContent}\n[/CODE]\n`);
+          const code = sanitize(b.code);
+          text = text.replace(b.id, `\n<<<CODE:${b.language}>>>\n${code}\n<<</CODE>>>\n`);
         });
       }
       
-      // Message role header
-      ensureSpace(40);
-      const roleLabel = msg.role === 'user' ? 'USER' : 'ASSISTANT';
-      const roleColor = msg.role === 'user' ? [16, 163, 127] : [139, 92, 246]; // Green for user, purple for AI
+      const isUser = msg.role === 'user';
+      const images = msg.images || [];
+      const textColor = isUser ? colors.userText : colors.aiText;
       
-      pdf.setFillColor(...roleColor);
-      pdf.roundedRect(margin, y - 12, 70, 18, 3, 3, 'F');
-      pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(9);
-      pdf.setTextColor(255, 255, 255);
-      pdf.text(roleLabel, margin + 8, y);
-      y += 18;
+      const bubbleMaxW = bubble.maxWidth;
+      const textMaxW = bubbleMaxW - (bubble.paddingH * 2);
       
-      // Process text content
+      // ========== CALCULATE BUBBLE HEIGHT WITH SEMANTIC SPACING ==========
+      let contentHeight = 0;
       const lines = text.split('\n');
-      let inCode = false;
-      let codeLanguage = '';
+      let prevLineType = null; // Track previous line type for proper spacing
       
-      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-        let line = lines[lineIdx];
+      // User images first
+      if (isUser && images.length) {
+        images.forEach(img => {
+          if (img?.base64) {
+            let iw = Math.min(img.width || 200, textMaxW);
+            let ih = (img.height || 150) * (iw / (img.width || 200));
+            if (ih > 180) ih = 180;
+            contentHeight += ih + spacing.paragraphMarginBottom;
+          }
+        });
+      }
+      
+      // Parse each line for height calculation
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
         
-        // Empty line = paragraph break
         if (!line.trim()) {
-          y += paragraphSpacing;
+          contentHeight += 6; // Empty line spacing
           continue;
         }
         
-        // ---- HEADERS ----
-        // H1 style: # Header or ## Header
+        if (line.match(/^<<<IMG:(\d+)>>>$/)) continue;
+        
+        // Code block
+        if (line.match(/^<<<CODE:/)) {
+          if (prevLineType) contentHeight += spacing.codeMarginY;
+          contentHeight += 20;
+          prevLineType = 'code-start';
+          continue;
+        }
+        if (line.match(/^<<<\/CODE>>>$/)) {
+          contentHeight += spacing.codeMarginY;
+          prevLineType = 'code-end';
+          continue;
+        }
+        
+        // Headers
+        if (line.match(/^#{1,3}\s+/)) {
+          contentHeight += spacing.headingMarginTop;
+          pdf.setFontSize(font.heading1);
+          const wrapped = pdf.splitTextToSize(line.replace(/^#+\s+/, ''), textMaxW);
+          contentHeight += wrapped.length * font.heading1Line;
+          contentHeight += spacing.headingMarginBottom;
+          prevLineType = 'heading';
+          continue;
+        }
+        
+        // Bullet / numbered list
+        if (line.match(/^[-*•]\s+/) || line.match(/^\d+[.)]\s+/) || line.match(/^\s{2,}[-*•]\s+/)) {
+          pdf.setFontSize(font.body);
+          const content = line.replace(/^[\s\-*•\d.)\]]+/, '');
+          const wrapped = pdf.splitTextToSize(content, textMaxW - 20);
+          contentHeight += wrapped.length * font.bodyLine + spacing.listItemMarginBottom;
+          prevLineType = 'list';
+          continue;
+        }
+        
+        // Regular paragraph
+        pdf.setFontSize(font.body);
+        const wrapped = pdf.splitTextToSize(line, textMaxW);
+        contentHeight += wrapped.length * font.bodyLine;
+        if (prevLineType === 'paragraph' || !prevLineType) {
+          contentHeight += spacing.paragraphMarginBottom;
+        }
+        prevLineType = 'paragraph';
+      }
+      
+      // AI images at end
+      if (!isUser && images.length) {
+        images.forEach(img => {
+          if (img?.base64) {
+            let iw = Math.min(img.width || 300, textMaxW);
+            let ih = (img.height || 200) * (iw / (img.width || 300));
+            if (ih > 220) ih = 220;
+            contentHeight += ih + spacing.paragraphMarginBottom;
+          }
+        });
+      }
+      
+      const bubbleH = contentHeight + (bubble.padding * 2) + 8;
+      const bubbleW = bubbleMaxW;
+      
+      // Position: User = right-aligned, AI = left-aligned
+      const bubbleX = isUser 
+        ? pageWidth - marginRight - bubbleW
+        : marginLeft;
+      
+      // Ensure space - continuous flow, no forced page breaks
+      ensureSpace(Math.min(bubbleH, 200) + spacing.bubbleGap);
+      
+      const bubbleY = y;
+      
+      // Draw bubble background
+      drawBubble(bubbleX, bubbleY, bubbleW, bubbleH, isUser);
+      
+      // ========== RENDER CONTENT WITH SEMANTIC HIERARCHY ==========
+      let contentY = bubbleY + bubble.padding + 12;
+      const contentX = bubbleX + bubble.paddingH;
+      let lastElementType = null;
+      
+      // User images first
+      if (isUser && images.length) {
+        for (const imgData of images) {
+          if (imgData?.base64) {
+            let iw = Math.min(imgData.width || 200, textMaxW);
+            let ih = (imgData.height || 150) * (iw / (imgData.width || 200));
+            if (ih > 180) { ih = 180; iw = (imgData.width || 200) * (ih / (imgData.height || 150)); }
+            try {
+              pdf.addImage(imgData.base64, 'JPEG', contentX, contentY, iw, ih);
+              contentY += ih + spacing.paragraphMarginBottom;
+            } catch(e) {
+              pdf.setFont('helvetica', 'italic');
+              pdf.setFontSize(font.body);
+              pdf.setTextColor(...colors.meta);
+              pdf.text('[Image]', contentX, contentY);
+              contentY += font.bodyLine;
+            }
+          }
+        }
+      }
+      
+      // Render text with proper semantic spacing
+      let inCode = false;
+      
+      for (let li = 0; li < lines.length; li++) {
+        const line = lines[li];
+        
+        if (line.match(/^<<<IMG:(\d+)>>>$/)) continue;
+        
+        // Empty line
+        if (!line.trim()) {
+          contentY += 6;
+          continue;
+        }
+        
+        // ===== CODE BLOCK START =====
+        if (line.match(/^<<<CODE:?(.*)>>>$/i)) {
+          inCode = true;
+          const codeLang = line.match(/^<<<CODE:?(.*)>>>$/i)?.[1] || '';
+          
+          // margin-top before code
+          if (lastElementType) contentY += spacing.codeMarginY;
+          
+          // Draw code block container
+          const codeStartY = contentY - 4;
+          
+          // Language label
+          if (codeLang) {
+            pdf.setFont('courier', 'normal');
+            pdf.setFontSize(font.meta);
+            pdf.setTextColor(...colors.meta);
+            pdf.text(codeLang.toLowerCase(), contentX + 12, contentY + 4);
+            contentY += 14;
+          }
+          
+          lastElementType = 'code';
+          continue;
+        }
+        
+        // ===== CODE BLOCK END =====
+        if (line.match(/^<<<\/CODE>>>$/i)) {
+          inCode = false;
+          contentY += spacing.codeMarginY;
+          lastElementType = 'code';
+          continue;
+        }
+        
+        // ===== CODE CONTENT =====
+        if (inCode) {
+          // Light background with border
+          pdf.setFillColor(...colors.codeBg);
+          pdf.setDrawColor(...colors.codeBorder);
+          pdf.setLineWidth(0.5);
+          pdf.rect(contentX - 12, contentY - 10, textMaxW + 24, font.codeLine + 4, 'F');
+          
+          pdf.setFont('courier', 'normal');
+          pdf.setFontSize(font.code);
+          pdf.setTextColor(...colors.aiText);
+          let codeLine = line.length > 75 ? line.substring(0, 72) + '...' : line;
+          pdf.text(codeLine, contentX, contentY);
+          contentY += font.codeLine;
+          continue;
+        }
+        
+        // ===== HEADINGS (h1, h2, h3) - margin: 18px 0 8px 0 =====
         const h1Match = line.match(/^#{1,2}\s+(.+)$/);
         if (h1Match) {
-          ensureSpace(30);
-          y += 8;
+          contentY += spacing.headingMarginTop;
           pdf.setFont('helvetica', 'bold');
-          pdf.setFontSize(14);
-          pdf.setTextColor(30, 30, 30);
-          const headerText = sanitizeForPDF(h1Match[1]);
-          const headerLines = pdf.splitTextToSize(headerText, contentWidth);
-          headerLines.forEach(hl => {
-            pdf.text(hl, margin, y);
-            y += 18;
+          pdf.setFontSize(font.heading1);
+          pdf.setTextColor(...colors.headingText);
+          const hLines = pdf.splitTextToSize(sanitize(h1Match[1]), textMaxW);
+          hLines.forEach(hl => {
+            pdf.text(hl, contentX, contentY);
+            contentY += font.heading1Line;
           });
-          y += 4;
-          // Underline for h1
-          pdf.setDrawColor(220, 220, 220);
-          pdf.line(margin, y - 8, margin + Math.min(pdf.getTextWidth(headerText), contentWidth), y - 8);
+          contentY += spacing.headingMarginBottom;
+          lastElementType = 'heading';
           continue;
         }
         
-        // H3 style: ### Header
         const h3Match = line.match(/^#{3,}\s+(.+)$/);
         if (h3Match) {
-          ensureSpace(25);
-          y += 5;
+          contentY += spacing.headingMarginTop - 4;
           pdf.setFont('helvetica', 'bold');
-          pdf.setFontSize(12);
-          pdf.setTextColor(50, 50, 50);
-          const h3Lines = pdf.splitTextToSize(sanitizeForPDF(h3Match[1]), contentWidth);
-          h3Lines.forEach(hl => {
-            pdf.text(hl, margin, y);
-            y += 16;
+          pdf.setFontSize(font.heading2);
+          pdf.setTextColor(...colors.headingText);
+          const hLines = pdf.splitTextToSize(sanitize(h3Match[1]), textMaxW);
+          hLines.forEach(hl => {
+            pdf.text(hl, contentX, contentY);
+            contentY += font.heading2Line;
           });
+          contentY += spacing.headingMarginBottom - 2;
+          lastElementType = 'heading';
           continue;
         }
         
-        // ---- CODE BLOCKS ----
-        if (line.match(/^\[CODE:?([A-Z]*)\]$/i)) {
-          inCode = true;
-          codeLanguage = line.match(/^\[CODE:?([A-Z]*)\]$/i)?.[1] || 'CODE';
-          ensureSpace(30);
-          y += 5;
-          // Code header bar
-          pdf.setFillColor(60, 60, 60);
-          pdf.roundedRect(margin, y - 10, contentWidth, 18, 3, 3, 'F');
-          pdf.setFont('courier', 'bold');
-          pdf.setFontSize(9);
-          pdf.setTextColor(200, 200, 200);
-          pdf.text(codeLanguage || 'CODE', margin + 8, y + 2);
-          y += 16;
-          continue;
-        }
-        
-        if (line.match(/^\[\/CODE\]$/i)) {
-          inCode = false;
-          y += 10;
-          continue;
-        }
-        
-        if (inCode) {
-          ensureSpace(14);
-          // Code background
-          pdf.setFillColor(245, 245, 245);
-          pdf.rect(margin, y - 10, contentWidth, 14, 'F');
-          pdf.setFont('courier', 'normal');
-          pdf.setFontSize(9);
-          pdf.setTextColor(40, 40, 40);
-          // Truncate long lines
-          const codeLine = line.length > 90 ? line.substring(0, 87) + '...' : line;
-          pdf.text(codeLine, margin + 5, y);
-          y += 12;
-          continue;
-        }
-        
-        // ---- NUMBERED LISTS ----
-        const numMatch = line.match(/^(\d+)\.\s+(.+)$/);
+        // ===== NUMBERED LISTS - margin-left: 20px, li margin-bottom: 6px =====
+        const numMatch = line.match(/^(\d+)[.)]\s+(.+)$/);
         if (numMatch) {
-          ensureSpace(lineHeight + 5);
-          pdf.setFont('helvetica', 'bold');
-          pdf.setFontSize(11);
-          pdf.setTextColor(50, 50, 50);
-          const numLabel = numMatch[1] + '.';
-          pdf.text(numLabel, margin, y);
-          
           pdf.setFont('helvetica', 'normal');
-          pdf.setTextColor(40, 40, 40);
-          const numContent = sanitizeForPDF(numMatch[2]);
-          const numLines = pdf.splitTextToSize(numContent, contentWidth - 25);
+          pdf.setFontSize(font.body);
+          pdf.setTextColor(...textColor);
+          
+          // Number with proper indent
+          pdf.text(`${numMatch[1]}.`, contentX, contentY);
+          
+          const numContent = sanitize(numMatch[2]);
+          const numLines = pdf.splitTextToSize(numContent, textMaxW - 20);
           numLines.forEach((nl, idx) => {
-            if (idx > 0) {
-              y += lineHeight;
-              ensureSpace(lineHeight);
-            }
-            pdf.text(nl, margin + 22, y);
+            pdf.text(nl, contentX + 20, contentY + (idx * font.bodyLine));
           });
-          y += lineHeight + 3;
+          contentY += numLines.length * font.bodyLine + spacing.listItemMarginBottom;
+          lastElementType = 'list';
           continue;
         }
         
-        // ---- BULLET POINTS ----
-        const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+        // ===== BULLET POINTS - list-style-position: outside, 1.2em indent =====
+        const bulletMatch = line.match(/^[-*•]\s+(.+)$/);
         if (bulletMatch) {
-          ensureSpace(lineHeight + 5);
           pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(11);
-          pdf.setTextColor(40, 40, 40);
-          // Draw bullet dot
-          pdf.setFillColor(80, 80, 80);
-          pdf.circle(margin + 4, y - 3, 2, 'F');
+          pdf.setFontSize(font.body);
+          pdf.setTextColor(...textColor);
           
-          const bulletContent = sanitizeForPDF(bulletMatch[1]);
-          const bulletLines = pdf.splitTextToSize(bulletContent, contentWidth - 20);
-          bulletLines.forEach((bl, idx) => {
-            if (idx > 0) {
-              y += lineHeight;
-              ensureSpace(lineHeight);
-            }
-            pdf.text(bl, margin + 15, y);
+          // Bullet outside, text indented
+          pdf.text('•', contentX, contentY);
+          
+          const bulletContent = sanitize(bulletMatch[1]);
+          const bLines = pdf.splitTextToSize(bulletContent, textMaxW - 14);
+          bLines.forEach((bl, idx) => {
+            pdf.text(bl, contentX + 14, contentY + (idx * font.bodyLine));
           });
-          y += lineHeight + 2;
+          contentY += bLines.length * font.bodyLine + spacing.listItemMarginBottom;
+          lastElementType = 'list';
           continue;
         }
         
-        // ---- BOLD TEXT HANDLING ----
-        pdf.setFont('helvetica', 'normal');
-        pdf.setFontSize(11);
-        pdf.setTextColor(40, 40, 40);
-        
-        // Check for bold markers **text**
-        if (line.includes('**')) {
-          const segments = [];
-          let remaining = line;
-          let isBold = false;
-          
-          while (remaining.length > 0) {
-            const boldIdx = remaining.indexOf('**');
-            if (boldIdx === -1) {
-              segments.push({ text: remaining, bold: isBold });
-              break;
-            }
-            if (boldIdx > 0) {
-              segments.push({ text: remaining.substring(0, boldIdx), bold: isBold });
-            }
-            isBold = !isBold;
-            remaining = remaining.substring(boldIdx + 2);
-          }
-          
-          // Render segments
-          const plainText = segments.map(s => s.text).join('');
-          const wrapped = pdf.splitTextToSize(plainText, contentWidth);
-          
-          for (const wrapLine of wrapped) {
-            ensureSpace(lineHeight);
-            let x = margin;
-            let charPos = 0;
-            
-            for (const seg of segments) {
-              pdf.setFont('helvetica', seg.bold ? 'bold' : 'normal');
-              for (let c = 0; c < seg.text.length && charPos < wrapLine.length; c++) {
-                if (seg.text[c] === wrapLine[charPos]) {
-                  pdf.text(wrapLine[charPos], x, y);
-                  x += pdf.getTextWidth(wrapLine[charPos]);
-                  charPos++;
-                }
-              }
-            }
-            y += lineHeight;
-          }
-          continue;
-        }
-        
-        // ---- REGULAR PARAGRAPH TEXT ----
-        ensureSpace(lineHeight);
-        const wrapped = pdf.splitTextToSize(line, contentWidth);
-        wrapped.forEach(chunk => {
-          ensureSpace(lineHeight);
+        // ===== SUB-BULLETS (nested) =====
+        const subMatch = line.match(/^\s{2,}[-*•]\s+(.+)$/);
+        if (subMatch) {
           pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(11);
-          pdf.setTextColor(40, 40, 40);
-          pdf.text(chunk, margin, y);
-          y += lineHeight;
-        });
+          pdf.setFontSize(font.body);
+          pdf.setTextColor(...textColor);
+          
+          pdf.text('◦', contentX + 14, contentY);
+          
+          const subContent = sanitize(subMatch[1]);
+          const sLines = pdf.splitTextToSize(subContent, textMaxW - 28);
+          sLines.forEach((sl, idx) => {
+            pdf.text(sl, contentX + 26, contentY + (idx * font.bodyLine));
+          });
+          contentY += sLines.length * font.bodyLine + spacing.listItemMarginBottom;
+          lastElementType = 'list';
+          continue;
+        }
+        
+        // ===== BLOCKQUOTES =====
+        const quoteMatch = line.match(/^>\s*(.+)$/);
+        if (quoteMatch) {
+          contentY += 4;
+          pdf.setDrawColor(...colors.aiBorder);
+          pdf.setLineWidth(2);
+          pdf.line(contentX, contentY - 10, contentX, contentY + 6);
+          
+          pdf.setFont('helvetica', 'italic');
+          pdf.setFontSize(font.body);
+          pdf.setTextColor(...colors.meta);
+          const qLines = pdf.splitTextToSize(sanitize(quoteMatch[1]), textMaxW - 16);
+          qLines.forEach(ql => {
+            pdf.text(ql, contentX + 14, contentY);
+            contentY += font.bodyLine;
+          });
+          contentY += spacing.paragraphMarginBottom;
+          lastElementType = 'quote';
+          continue;
+        }
+        
+        // ===== REGULAR PARAGRAPH - margin-bottom: 12px =====
+        const height = renderBoldText(line, contentX, textMaxW, textColor, font.body, font.bodyLine, contentY);
+        contentY += height + spacing.paragraphMarginBottom;
+        lastElementType = 'paragraph';
       }
       
-      // Spacing between messages
-      y += sectionSpacing;
-      
-      // Add subtle separator between messages
-      if (msgIdx < data.messages.length - 1) {
-        ensureSpace(20);
-        pdf.setDrawColor(230, 230, 230);
-        pdf.setLineWidth(0.5);
-        const separatorWidth = 100;
-        pdf.line((pageWidth - separatorWidth) / 2, y - 10, (pageWidth + separatorWidth) / 2, y - 10);
+      // AI images at end
+      if (!isUser && images.length) {
+        for (const imgData of images) {
+          if (imgData?.base64) {
+            let iw = Math.min(imgData.width || 300, textMaxW);
+            let ih = (imgData.height || 200) * (iw / (imgData.width || 300));
+            if (ih > 220) { ih = 220; iw = (imgData.width || 300) * (ih / (imgData.height || 200)); }
+            contentY += 4;
+            try {
+              pdf.addImage(imgData.base64, 'JPEG', contentX, contentY, iw, ih);
+              contentY += ih + spacing.paragraphMarginBottom;
+            } catch(e) {
+              pdf.setFont('helvetica', 'italic');
+              pdf.setFontSize(font.body);
+              pdf.setTextColor(...colors.meta);
+              pdf.text('[Image]', contentX, contentY);
+              contentY += font.bodyLine;
+            }
+          }
+        }
       }
+      
+      // Move y past bubble + 24px gap (margin-bottom: 24px)
+      y = bubbleY + bubbleH + spacing.bubbleGap;
     }
     
-    // Add footer to last page
-    addPageFooter();
+    // ========== PAGE NUMBERS ==========
+    const totalPages = pdf.internal.getNumberOfPages();
+    for (let i = 1; i <= totalPages; i++) {
+      pdf.setPage(i);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(font.meta);
+      pdf.setTextColor(...colors.meta);
+      pdf.text(`${i}`, pageWidth / 2, pageHeight - 24);
+    }
     
-    // Save the PDF
+    // Save PDF
     const filename = safeTitle.replace(/[^a-z0-9]/gi, '_').substring(0, 50) + '.pdf';
     pdf.save(filename);
     console.log('PDF saved:', filename);
     
   } catch (error) {
-    console.error('PDF error:', error);
+    console.error('PDF generation error:', error);
     alert('Error generating PDF: ' + error.message);
   }
 }
@@ -1103,6 +2271,14 @@ function downloadMarkdown(data) {
     if (msg.codeBlocks?.length) {
       msg.codeBlocks.forEach(block => {
         text = text.replace(block.id, `\n\`\`\`${block.language}\n${block.code}\n\`\`\`\n`);
+      });
+    }
+    
+    // Handle images - add markdown image syntax
+    if (msg.images?.length) {
+      msg.images.forEach((img, imgIdx) => {
+        const alt = img.alt || `Image ${imgIdx + 1}`;
+        text += `\n\n![${alt}](${img.src})\n`;
       });
     }
     
@@ -1178,6 +2354,15 @@ function downloadHTML(data) {
         text = text.replace(block.id, 
           `<div class="code-block"><div class="code-header">${escapeHTML(block.language.toUpperCase())}</div><pre><code>${escapedCode}</code></pre></div>`
         );
+      });
+    }
+    
+    // Handle images
+    let imagesHTML = '';
+    if (msg.images?.length) {
+      msg.images.forEach((img, imgIdx) => {
+        const alt = escapeHTML(img.alt || `Image ${imgIdx + 1}`);
+        imagesHTML += `<figure class="message-image"><img src="${escapeHTML(img.src)}" alt="${alt}" loading="lazy"><figcaption>${alt}</figcaption></figure>`;
       });
     }
     
@@ -1258,6 +2443,9 @@ function downloadHTML(data) {
     if (inList) {
       html += listType === 'ul' ? '</ul>' : '</ol>';
     }
+    
+    // Add images at the end
+    html += imagesHTML;
     
     return html;
   };
@@ -1437,6 +2625,26 @@ function downloadHTML(data) {
       font-family: 'SF Mono', Monaco, 'Courier New', monospace;
       font-size: 0.9em;
       color: #c7254e;
+    }
+    
+    /* Images */
+    .message-image {
+      margin: 15px 0;
+      text-align: center;
+    }
+    
+    .message-image img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    
+    .message-image figcaption {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #666;
+      font-style: italic;
     }
     
     /* Footer */
