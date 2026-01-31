@@ -36,7 +36,7 @@
         "https://claude.ai/*",
         "https://gemini.google.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["libs/jspdf.umd.min.js", "content.js"],
       "run_at": "document_end",
       "all_frames": false
     }
