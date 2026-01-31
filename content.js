@@ -208,6 +208,319 @@ function shouldFilterLine(line) {
 }
 
 // ============================================
+// BLOCK-BASED DOM PARSER (Enterprise Grade)
+// ============================================
+
+/**
+ * Parses a DOM element into structured blocks (Text, Code, Table, Image, Header)
+ * This guarantees perfect formatting for tables, code, and images
+ */
+function parseNodesToBlocks(root) {
+  const blocks = [];
+  let currentText = '';
+  
+  function flushText() {
+    if (currentText.trim()) {
+      blocks.push({ type: 'text', content: currentText.trim() });
+      currentText = '';
+    }
+  }
+  
+  function traverse(node) {
+    if (!node) return;
+    
+    // Handle text nodes
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
+      if (text.trim()) {
+        currentText += text;
+      }
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    
+    const tag = node.tagName.toLowerCase();
+    
+    // Skip hidden elements
+    if (tag === 'script' || tag === 'style' || tag === 'noscript') return;
+    if (node.hidden || node.style?.display === 'none') return;
+
+    // --- 1. IMAGES ---
+    if (tag === 'img') {
+      flushText();
+      const src = node.src || node.getAttribute('data-src') || '';
+      const width = node.naturalWidth || node.width || 0;
+      const height = node.naturalHeight || node.height || 0;
+      
+      // Filter out tiny icons
+      if (src && (width > 50 || height > 50 || src.startsWith('blob:'))) {
+        if (!src.includes('icon') && !src.includes('avatar') && !src.includes('logo')) {
+          blocks.push({ 
+            type: 'image', 
+            src: src,
+            width: width || 300,
+            height: height || 200
+          });
+        }
+      }
+      return;
+    }
+
+    // --- 2. CODE BLOCKS ---
+    if (tag === 'pre') {
+      flushText();
+      const codeEl = node.querySelector('code') || node;
+      const langClass = (codeEl.className || '').toLowerCase();
+      const langMatch = langClass.match(/language-(\w+)/) || langClass.match(/lang-(\w+)/);
+      const lang = langMatch ? langMatch[1] : 'code';
+      const content = codeEl.innerText || codeEl.textContent || '';
+      
+      if (content.trim()) {
+        blocks.push({ 
+          type: 'code', 
+          lang: lang.toUpperCase(), 
+          content: content.trim() 
+        });
+      }
+      return; // Don't traverse children
+    }
+
+    // --- 3. TABLES ---
+    if (tag === 'table') {
+      flushText();
+      const rows = [];
+      node.querySelectorAll('tr').forEach(tr => {
+        const row = [];
+        tr.querySelectorAll('th, td').forEach(td => {
+          row.push(td.innerText?.trim() || '');
+        });
+        if (row.length > 0 && row.some(cell => cell)) {
+          rows.push(row);
+        }
+      });
+      if (rows.length > 0) {
+        blocks.push({ type: 'table', rows: rows });
+      }
+      return; // Don't traverse children
+    }
+
+    // --- 4. HEADERS ---
+    if (/^h[1-6]$/.test(tag)) {
+      flushText();
+      const content = node.innerText?.trim();
+      if (content) {
+        blocks.push({ type: 'header', content: content });
+      }
+      return;
+    }
+
+    // --- 5. LIST ITEMS ---
+    if (tag === 'li') {
+      flushText();
+      const content = node.innerText?.trim();
+      if (content) {
+        blocks.push({ type: 'list_item', content: content });
+      }
+      return;
+    }
+
+    // --- 6. BLOCKQUOTE ---
+    if (tag === 'blockquote') {
+      flushText();
+      const content = node.innerText?.trim();
+      if (content) {
+        blocks.push({ type: 'quote', content: content });
+      }
+      return;
+    }
+
+    // --- Handle inline formatting ---
+    const isBold = tag === 'strong' || tag === 'b';
+    if (isBold) currentText += '**';
+    
+    // Recurse for containers (div, p, span, etc.)
+    for (const child of node.childNodes) {
+      traverse(child);
+    }
+    
+    if (isBold) currentText += '**';
+    
+    // Add paragraph breaks for block elements
+    if (['p', 'div', 'br'].includes(tag)) {
+      flushText();
+      if (blocks.length > 0 && blocks[blocks.length - 1].type !== 'break') {
+        blocks.push({ type: 'break' });
+      }
+    }
+  }
+
+  traverse(root);
+  flushText(); // Flush any remaining text
+  
+  // Clean up trailing breaks
+  while (blocks.length > 0 && blocks[blocks.length - 1].type === 'break') {
+    blocks.pop();
+  }
+  
+  return blocks;
+}
+
+// ============================================
+// ROBUST DOM TO TEXT PARSER (With Table Support)
+// ============================================
+
+/**
+ * Parse DOM content and convert HTML formatting to Text with Markers
+ * Uses ## for headers, • for bullets, converts tables to readable text
+ * This is the STABLE version that reliably handles formatting
+ */
+function parseDomContent(element) {
+  let text = '';
+  const images = [];
+  const codeBlocks = [];
+  let codeBlockIndex = 0;
+  
+  // Helper to process nodes recursively
+  function traverse(node) {
+    if (!node) return;
+    
+    // Handle text nodes - clean up zero-width spaces
+    if (node.nodeType === Node.TEXT_NODE) {
+      const content = (node.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
+      if (content.trim()) {
+        text += content;
+      }
+      return;
+    }
+    
+    // Only process element nodes
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    
+    const tag = node.tagName.toLowerCase();
+    
+    // Skip hidden elements and scripts
+    if (tag === 'script' || tag === 'style' || tag === 'noscript') return;
+    if (node.hidden || node.style?.display === 'none') return;
+    
+    // --- IMAGES ---
+    if (tag === 'img') {
+      const src = node.src || node.getAttribute('data-src') || '';
+      const width = node.naturalWidth || node.width || parseInt(node.getAttribute('width')) || 0;
+      const height = node.naturalHeight || node.height || parseInt(node.getAttribute('height')) || 0;
+      
+      // Filter: keep content images, skip icons
+      if (src && width > 50 && height > 50 && !src.includes('data:image/svg')) {
+        if (!src.includes('icon') && !src.includes('avatar') && !src.includes('logo')) {
+          if (!images.find(i => i.src === src)) {
+            images.push({ src, width: width || 300, height: height || 200 });
+          }
+        }
+      }
+      return;
+    }
+    
+    // --- CODE BLOCKS ---
+    if (tag === 'pre') {
+      const codeEl = node.querySelector('code') || node;
+      const code = codeEl.innerText || codeEl.textContent || '';
+      const langClass = (codeEl.className || '').toLowerCase();
+      const langMatch = langClass.match(/language-(\w+)/) || langClass.match(/lang-(\w+)/);
+      const lang = langMatch ? langMatch[1] : 'CODE';
+      
+      if (code.trim()) {
+        const id = `[CODE_${codeBlockIndex}]`;
+        codeBlocks.push({ id, language: lang.toUpperCase(), code: code.trim() });
+        text += `\n${id}\n`;
+        codeBlockIndex++;
+      }
+      return; // Don't process children of pre
+    }
+    
+    // --- TABLES (Convert to readable text) ---
+    if (tag === 'table') {
+      text += '\n\n[TABLE]:\n';
+      node.querySelectorAll('tr').forEach(tr => {
+        text += '| ';
+        tr.querySelectorAll('td, th').forEach(cell => {
+          text += cell.innerText.trim() + ' | ';
+        });
+        text += '\n';
+      });
+      text += '\n';
+      return; // Don't process children
+    }
+    
+    // --- FORMATTING MARKERS ---
+    const isHeader = /^h[1-6]$/.test(tag);
+    const isBold = tag === 'strong' || tag === 'b';
+    
+    if (isHeader) text += '\n\n## ';  // Header marker
+    if (tag === 'li') text += '\n• '; // Bullet marker
+    if (isBold) text += '**';         // Bold marker
+    if (tag === 'br' || tag === 'p') text += '\n';
+    if (tag === 'div' && text.length > 0 && !text.endsWith('\n')) text += '\n';
+    
+    // Recurse through children
+    for (const child of node.childNodes) {
+      traverse(child);
+    }
+    
+    // Close formatting markers
+    if (isBold) text += '**';
+    if (isHeader) text += '\n';
+  }
+  
+  traverse(element);
+  
+  // Final cleanup of extra whitespace
+  return { 
+    text: text.replace(/\n{3,}/g, '\n\n').trim(), 
+    images, 
+    codeBlocks 
+  };
+}
+
+/**
+ * Extract images from a DOM element (alternative method)
+ * Returns array of image data with src, width, height
+ */
+function extractImagesFromElement(element) {
+  const images = [];
+  const seenSrcs = new Set();
+  
+  // Find all img tags
+  const imgElements = element.querySelectorAll('img');
+  
+  for (const img of imgElements) {
+    const src = img.src || img.getAttribute('data-src') || '';
+    if (!src || seenSrcs.has(src)) continue;
+    
+    const width = img.naturalWidth || img.width || parseInt(img.getAttribute('width')) || 0;
+    const height = img.naturalHeight || img.height || parseInt(img.getAttribute('height')) || 0;
+    
+    // Skip icons, avatars, tiny images
+    if (src.includes('icon') || src.includes('avatar') || src.includes('logo')) continue;
+    if (src.includes('data:image/svg')) continue;
+    if (width > 0 && width < 50 && height > 0 && height < 50) continue;
+    
+    // Skip images in navigation/sidebar
+    if (img.closest('nav, aside, [role="navigation"], [class*="sidebar"], [class*="header"]')) continue;
+    
+    seenSrcs.add(src);
+    images.push({
+      src,
+      width: width || 200,
+      height: height || 150,
+      type: 'image',
+      element: img
+    });
+  }
+  
+  return images;
+}
+
+// ============================================
 // GEMINI EXTRACTION
 // ============================================
 
@@ -410,58 +723,40 @@ async function extractGeminiContent() {
     console.log(`📷 Pre-scan: User image at Y=${(rect.top + window.scrollY).toFixed(0)}, src=${img.src.substring(0, 60)}`);
   }
   
-  // Build final messages array
+  // Build final messages array using ROBUST text-marker extraction
   for (const msg of dedupedMessages) {
     const el = msg.el;
-    let text = cleanText(msg.text, false);
     
-    // Extract code blocks
-    const codeBlocks = extractCodeBlocks(el, messages.length);
-    for (const cb of codeBlocks) {
-      text = text.replace(cb.code, cb.id);
-    }
-    
-    // Extract images - for user messages, look in the message element itself first
-    // Use a Set to track already-captured image sources to prevent duplicates
-    const capturedImageSrcs = new Set();
-    let images = await extractImages(el, msg.role);
-    
-    // Deduplicate images by source URL
-    images = images.filter(img => {
-      const src = img.src || img.base64?.substring(0, 100) || '';
-      if (capturedImageSrcs.has(src)) return false;
-      capturedImageSrcs.add(src);
-      return true;
-    });
+    // Use the STABLE text-marker parser (## for headers, • for bullets)
+    const { text, images, codeBlocks } = parseDomContent(el);
     
     // For Gemini user messages, search more thoroughly for images
-    if (msg.role === 'user' && images.length === 0) {
+    let additionalImages = await extractImages(el, msg.role);
+    
+    if (msg.role === 'user' && additionalImages.length === 0) {
       console.log('📷 No images in direct element, searching parent containers...');
       
-      // Search up to 6 levels of parents - don't require specific class names
-      // Just avoid going into sidebar/nav containers
+      // Search up to 6 levels of parents
       let parent = el.parentElement;
-      for (let lvl = 0; lvl < 6 && parent && images.length === 0; lvl++) {
-        // Stop if we hit main, body, or navigation elements
+      for (let lvl = 0; lvl < 6 && parent && additionalImages.length === 0; lvl++) {
         if (parent.tagName === 'MAIN' || parent.tagName === 'BODY') break;
         if (parent.closest('aside, nav, [role="navigation"], [class*="sidebar"]')) break;
         
         console.log(`📷 Checking parent level ${lvl}: <${parent.tagName}> class="${(parent.className || '').substring(0, 50)}"`);
-        images = await extractImages(parent, msg.role);
+        additionalImages = await extractImages(parent, msg.role);
         parent = parent.parentElement;
       }
     }
     
     // Also check for images in preceding siblings (Gemini sometimes puts image preview before text)
-    if (msg.role === 'user' && images.length === 0) {
+    if (msg.role === 'user' && additionalImages.length === 0) {
       console.log('📷 No images in parents, checking siblings...');
       let prevSibling = el.previousElementSibling;
       for (let i = 0; i < 5 && prevSibling; i++) {
-        // Check siblings that might contain images (don't require small text)
         const siblingImages = await extractImages(prevSibling, msg.role);
         if (siblingImages.length > 0) {
           console.log(`📷 Found ${siblingImages.length} images in sibling ${i}`);
-          images.push(...siblingImages);
+          additionalImages.push(...siblingImages);
           break;
         }
         prevSibling = prevSibling.previousElementSibling;
@@ -469,13 +764,13 @@ async function extractGeminiContent() {
     }
     
     // Last resort: check following siblings too
-    if (msg.role === 'user' && images.length === 0) {
+    if (msg.role === 'user' && additionalImages.length === 0) {
       let nextSibling = el.nextElementSibling;
       for (let i = 0; i < 3 && nextSibling; i++) {
         const siblingImages = await extractImages(nextSibling, msg.role);
         if (siblingImages.length > 0) {
           console.log(`📷 Found ${siblingImages.length} images in next sibling ${i}`);
-          images.push(...siblingImages);
+          additionalImages.push(...siblingImages);
           break;
         }
         nextSibling = nextSibling.nextElementSibling;
@@ -483,36 +778,37 @@ async function extractGeminiContent() {
     }
     
     // FINAL fallback: Use pre-scanned images based on vertical position
-    // Assign images that are positioned just above this message element
-    if (msg.role === 'user' && images.length === 0 && allConversationImages.length > 0) {
+    if (msg.role === 'user' && additionalImages.length === 0 && allConversationImages.length > 0) {
       const msgRect = el.getBoundingClientRect();
       const msgTop = msgRect.top + window.scrollY;
       
       console.log(`📷 Fallback: Looking for pre-scanned images near msgTop=${msgTop.toFixed(0)}`);
       
-      // Find images that are positioned within 300px above this message and not yet assigned
       for (const imgData of allConversationImages) {
         if (imgData.assigned) continue;
         const diff = msgTop - imgData.top;
-        // Image should be above the message text (diff > 0) and within 300px
         if (diff >= -50 && diff <= 300) {
           console.log(`📷 Fallback: Assigning image at Y=${imgData.top.toFixed(0)} to message at Y=${msgTop.toFixed(0)} (diff=${diff.toFixed(0)})`);
-          // We need to capture this image
           const capturedImages = await extractImages(imgData.img.parentElement, msg.role);
           if (capturedImages.length > 0) {
-            images.push(...capturedImages);
+            additionalImages.push(...capturedImages);
             imgData.assigned = true;
           }
         }
       }
     }
     
-    messages.push({
-      role: msg.role,
-      text: formatMessageText(text),
-      codeBlocks,
-      images
-    });
+    // Merge all images
+    const allImages = [...images, ...additionalImages];
+    
+    if (text || allImages.length > 0) {
+      messages.push({ 
+        role: msg.role, 
+        text: formatMessageText(text),
+        codeBlocks,
+        images: allImages
+      });
+    }
   }
   
   // Fallback if nothing found
@@ -523,11 +819,16 @@ async function extractGeminiContent() {
     clone.querySelectorAll('nav, aside, [class*="sidebar"], button, input, textarea, svg').forEach(e => e.remove());
     const text = cleanText(clone.innerText || '', false);
     if (text.length > 50) {
-      messages.push({ role: 'assistant', text: formatMessageText(text), codeBlocks: [], images: [] });
+      messages.push({ 
+        role: 'assistant', 
+        text: formatMessageText(text),
+        codeBlocks: [],
+        images: []
+      });
     }
   }
   
-  console.log(`📊 Extracted ${messages.length} messages from Gemini (${messages.filter(m=>m.role==='user').length} user, ${messages.filter(m=>m.role==='assistant').length} assistant)`);
+  console.log(`📊 Extracted ${messages.length} messages from Gemini (Text-Marker Mode)`);
   
   return { title, messages };
 }
@@ -1483,31 +1784,28 @@ async function extractClaudeContent() {
     }
   }
   
-  // Build final messages array
+  // Build final messages array using ROBUST text-marker extraction
   for (const msg of dedupedMessages) {
     const el = msg.el;
-    let text = cleanText(msg.text, false);
     
-    // Skip if text became empty after cleaning
+    // Use the STABLE text-marker parser (## for headers, • for bullets)
+    const { text, images, codeBlocks } = parseDomContent(el);
+    
+    // Skip if text became empty after parsing
     if (!text || text.length < 5) continue;
     
     // Skip UI-only messages
     if (/^(Copy|Retry|Continue|Edit|Share|View more|Show less)$/i.test(text.trim())) continue;
     
-    // Extract code blocks using helper
-    const codeBlocks = extractCodeBlocks(el, messages.length);
-    for (const cb of codeBlocks) {
-      text = text.replace(cb.code, cb.id);
-    }
+    // Also use extractImages for screenshot capture if needed
+    const additionalImages = await extractImages(el);
+    const allImages = [...images, ...additionalImages];
     
-    // Extract images (async to capture base64)
-    const images = await extractImages(el);
-    
-    messages.push({
-      role: msg.role,
+    messages.push({ 
+      role: msg.role, 
       text: formatMessageText(text),
       codeBlocks,
-      images
+      images: allImages
     });
   }
   
@@ -1535,87 +1833,95 @@ async function extractClaudeContent() {
     }
   }
   
-  console.log(`📊 Extracted ${messages.length} messages from Claude (${messages.filter(m=>m.role==='user').length} user, ${messages.filter(m=>m.role==='assistant').length} assistant)`);
+  console.log(`📊 Extracted ${messages.length} messages from Claude (Text-Marker Mode)`);
   
   return { title, messages };
 }
 
 // ============================================
-// CHATGPT EXTRACTION
+// CHATGPT EXTRACTION (Block-Based)
 // ============================================
 
 async function extractChatGPTContent() {
-  console.log('🔍 Extracting ChatGPT conversation...');
+  console.log('🔍 Extracting ChatGPT conversation (Text-Marker Mode)...');
   
   const articles = document.querySelectorAll('article');
   const messages = [];
   const titleEl = document.querySelector('h1, [class*="text-2xl"]');
   const title = titleEl?.innerText?.trim() || 'ChatGPT Conversation';
   
-  articles.forEach(article => {
-    let role = 'assistant';
-    if (article.querySelector('[data-message-author-role="user"]')) {
-      role = 'user';
-    }
+  for (const article of articles) {
+    // Role Detection (Robust) - check for user role attribute
+    const isUser = article.querySelector('[data-message-author-role="user"]');
+    const role = isUser ? 'user' : 'assistant';
     
-    const contentNode = article.querySelector('.markdown') || article.querySelector('[data-message-author-role] + div');
+    // Content wrapper - try multiple selectors
+    const contentNode = article.querySelector('.markdown') || 
+                        article.querySelector('[data-message-author-role] + div') ||
+                        article.querySelector('.prose');
     
     if (contentNode) {
-      // Clone and clean
-      const clone = contentNode.cloneNode(true);
-      clone.querySelectorAll('button, svg, .sr-only').forEach(el => el.remove());
+      // Use the STABLE text-marker parser (## for headers, • for bullets)
+      const { text, images, codeBlocks } = parseDomContent(contentNode);
       
-      let text = '';
-      const codeBlocks = [];
-      const images = [];
+      // SPECIAL: Search for DALL-E / File Upload / Grid images in the article
+      const extraImageSelectors = [
+        'img[src^="blob:"]',
+        '.grid img',
+        'img[alt*="Generated"]',
+        'img[alt*="Image"]',
+        '[class*="image"] img',
+        'img[src*="oaidalleapi"]',
+        'img[src*="openai"]',
+        'img[width="100%"]'
+      ];
       
-      // Extract images first
-      contentNode.querySelectorAll('img:not([class*="icon"]):not([class*="avatar"])').forEach((img, imgIdx) => {
-        if (img.src && (img.naturalWidth > 50 || !img.complete)) {
-          images.push({
-            src: img.src,
-            alt: img.alt || `Image ${imgIdx + 1}`,
-            width: img.naturalWidth,
-            height: img.naturalHeight
+      const capturedSrcs = new Set(images.map(i => i.src));
+      
+      for (const selector of extraImageSelectors) {
+        try {
+          const extraImages = article.querySelectorAll(selector);
+          for (const img of extraImages) {
+            const imgWidth = img.naturalWidth || img.width || 0;
+            if (img.src && !capturedSrcs.has(img.src) && imgWidth > 50) {
+              capturedSrcs.add(img.src);
+              images.push({ 
+                src: img.src, 
+                width: imgWidth || 300,
+                height: img.naturalHeight || img.height || 200
+              });
+            }
+          }
+        } catch(e) {}
+      }
+      
+      // Also try screenshot capture for CORS-blocked images
+      const additionalImages = await extractImages(contentNode, role);
+      for (const img of additionalImages) {
+        const src = img.src || '';
+        if (img.base64 && !capturedSrcs.has(src)) {
+          capturedSrcs.add(src);
+          images.push({ 
+            src: img.base64,
+            width: img.width || 300,
+            height: img.height || 200,
+            isBase64: true
           });
         }
-      });
+      }
       
-      clone.childNodes.forEach(node => {
-        if (node.nodeType === Node.TEXT_NODE) {
-          const t = node.textContent.trim();
-          if (t) text += t + '\n';
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
-          const tag = node.tagName.toLowerCase();
-          const content = node.innerText?.trim();
-          if (!content) return;
-          
-          if (tag === 'pre') {
-            const codeEl = node.querySelector('code');
-            const code = (codeEl || node).innerText.trim();
-            const lang = (codeEl?.className.match(/language-(\w+)/) || [])[1] || 'code';
-            const id = `[CODE_BLOCK_${codeBlocks.length}]`;
-            codeBlocks.push({ id, language: lang, code });
-            text += '\n' + id + '\n';
-          } else if (['h1','h2','h3','h4'].includes(tag)) {
-            text += '\n## ' + content + '\n';
-          } else if (tag === 'ul' || tag === 'ol') {
-            node.querySelectorAll('li').forEach((li, idx) => {
-              text += (tag === 'ol' ? `${idx+1}. ` : '- ') + li.innerText.trim() + '\n';
-            });
-          } else {
-            text += content + '\n';
-          }
-        }
-      });
-      
-      text = cleanText(text);
-      if (text) {
-        messages.push({ role, text, codeBlocks, images });
+      if (text || images.length > 0) {
+        messages.push({ 
+          role, 
+          text,
+          codeBlocks,
+          images
+        });
       }
     }
-  });
+  }
   
+  console.log(`📊 Extracted ${messages.length} messages from ChatGPT (Text-Marker Mode)`);
   return { title, messages };
 }
 
@@ -1637,11 +1943,25 @@ async function extractConversation() {
   }
   
   const date = new Date().toLocaleString();
+  
+  // Calculate word count from blocks (new format) or text (legacy)
+  const countWords = (msg) => {
+    if (msg.blocks) {
+      return msg.blocks.reduce((sum, block) => {
+        if (block.type === 'text' || block.type === 'header' || block.type === 'list_item' || block.type === 'quote') {
+          return sum + (block.content?.split(/\s+/).length || 0);
+        }
+        return sum;
+      }, 0);
+    }
+    return msg.text?.split(/\s+/).length || 0;
+  };
+  
   const stats = {
     total: result.messages.length,
     user: result.messages.filter(m => m.role === 'user').length,
     assistant: result.messages.filter(m => m.role === 'assistant').length,
-    words: result.messages.reduce((acc, m) => acc + (m.text?.split(/\s+/).length || 0), 0)
+    words: result.messages.reduce((acc, m) => acc + countWords(m), 0)
   };
   
   return { title: result.title, date, stats, messages: result.messages };
