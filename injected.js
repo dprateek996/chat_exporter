@@ -219,8 +219,8 @@
           const x = isUser ? (pageWidth - margin - bubbleWidth) : margin;
           const padding = 20;
           
-          // SAFETY BUFFER: Narrower than the box to prevent cutoff
-          const textWidth = bubbleWidth - 50;
+          // ULTRA-SAFE BUFFER: Even narrower to prevent cutoff (60pt)
+          const textWidth = bubbleWidth - 60;
 
           // 1. PROCESS TEXT - Inject code blocks
           let rawText = sanitizeForPDF(msg.text || '').replace(/\*\*/g, '');
@@ -240,34 +240,32 @@
             line = line.trimEnd();
             if (!line) continue;
 
-            // DETECT MARKERS
-            if (line.startsWith('## ')) {
-              // HEADER DETECTED
+            // HEADERS: Detect any line with '## ' (not just at start)
+            if (line.includes('## ')) {
               pdf.setFont('helvetica', 'bold');
-              const clean = line.replace('## ', '').toUpperCase();
+              const clean = line.replace(/##/g, '').trim().toUpperCase();
               const split = pdf.splitTextToSize(clean, textWidth);
               split.forEach(s => finalLines.push({ text: s, type: 'header' }));
             }
-            else if (line.startsWith('• ')) {
-              // BULLET DETECTED
+            // BULLETS: Detect lines starting with bullet or dash
+            else if (line.trim().startsWith('•') || line.trim().startsWith('- ')) {
               pdf.setFont('helvetica', 'normal');
-              const split = pdf.splitTextToSize(line, textWidth);
+              const split = pdf.splitTextToSize(line.trim(), textWidth);
               split.forEach(s => finalLines.push({ text: s, type: 'bullet' }));
             }
+            // CODE MARKERS
             else if (line.startsWith('[CODE:')) {
               finalLines.push({ text: line, type: 'code_meta' });
             }
-            else if (line.startsWith('[ENDCODE]')) {
-              // skip
-            }
-            else if (line.startsWith('[TABLE]:') || line.startsWith('|')) {
-              // TABLE DATA - render as monospace
+            else if (line.startsWith('[ENDCODE]')) { /* skip */ }
+            // TABLES: Detect new aggressive marker
+            else if (line.startsWith('[TABLE_GRID]') || line.startsWith('|')) {
               pdf.setFont('courier', 'normal');
               const split = pdf.splitTextToSize(line, textWidth);
               split.forEach(s => finalLines.push({ text: s, type: 'table' }));
             }
+            // NORMAL TEXT
             else {
-              // NORMAL TEXT
               pdf.setFont('helvetica', 'normal');
               const split = pdf.splitTextToSize(line, textWidth);
               split.forEach(s => finalLines.push({ text: s, type: 'text' }));
@@ -293,7 +291,7 @@
           for (const l of finalLines) {
             if (l.type === 'header') {
               pdf.setFont('helvetica', 'bold');
-              pdf.setFontSize(11);
+              pdf.setFontSize(12); // Slightly bigger for header
               pdf.text(l.text, cx, cy);
               cy += lineHeight + 5;
             }

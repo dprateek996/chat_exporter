@@ -375,105 +375,89 @@ function parseNodesToBlocks(root) {
  * Uses ## for headers, • for bullets, converts tables to readable text
  * This is the STABLE version that reliably handles formatting
  */
-function parseDomContent(element) {
+// ============================================
+// CONTENT SCRIPT: AGGRESSIVE FORMATTER
+// ============================================
+function parseDomToText(element) {
   let text = '';
   const images = [];
   const codeBlocks = [];
-  let codeBlockIndex = 0;
-  
-  // Helper to process nodes recursively
+
   function traverse(node) {
-    if (!node) return;
-    
-    // Handle text nodes - clean up zero-width spaces
     if (node.nodeType === Node.TEXT_NODE) {
-      const content = (node.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
-      if (content.trim()) {
-        text += content;
-      }
+      // Clean up zero-width spaces
+      text += node.textContent.replace(/[\u200B-\u200D\uFEFF]/g, '');
       return;
     }
-    
-    // Only process element nodes
+
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     
     const tag = node.tagName.toLowerCase();
     
-    // Skip hidden elements and scripts
-    if (tag === 'script' || tag === 'style' || tag === 'noscript') return;
-    if (node.hidden || node.style?.display === 'none') return;
-    
     // --- IMAGES ---
     if (tag === 'img') {
-      const src = node.src || node.getAttribute('data-src') || '';
-      const width = node.naturalWidth || node.width || parseInt(node.getAttribute('width')) || 0;
-      const height = node.naturalHeight || node.height || parseInt(node.getAttribute('height')) || 0;
-      
-      // Filter: keep content images, skip icons
-      if (src && width > 50 && height > 50 && !src.includes('data:image/svg')) {
-        if (!src.includes('icon') && !src.includes('avatar') && !src.includes('logo')) {
-          if (!images.find(i => i.src === src)) {
-            images.push({ src, width: width || 300, height: height || 200 });
-          }
-        }
+      // Filter out tiny UI icons (width < 50), keep real images
+      if (node.width > 50 && node.height > 50 && !node.src.includes('data:image/svg')) {
+        images.push({ src: node.src, width: node.width, height: node.height });
       }
       return;
     }
-    
+
     // --- CODE BLOCKS ---
     if (tag === 'pre') {
       const codeEl = node.querySelector('code') || node;
-      const code = codeEl.innerText || codeEl.textContent || '';
-      const langClass = (codeEl.className || '').toLowerCase();
-      const langMatch = langClass.match(/language-(\w+)/) || langClass.match(/lang-(\w+)/);
-      const lang = langMatch ? langMatch[1] : 'CODE';
-      
-      if (code.trim()) {
-        const id = `[CODE_${codeBlockIndex}]`;
-        codeBlocks.push({ id, language: lang.toUpperCase(), code: code.trim() });
-        text += `\n${id}\n`;
-        codeBlockIndex++;
-      }
-      return; // Don't process children of pre
+      const lang = (codeEl.className || '').replace('language-', '') || 'CODE';
+      const id = `[CODE_BLOCK_${codeBlocks.length}]`;
+      codeBlocks.push({ id, language: lang, code: codeEl.innerText });
+      text += `\n${id}\n`;
+      return;
     }
+
+    // --- AGGRESSIVE FORMATTING MARKERS ---
     
-    // --- TABLES (Convert to readable text) ---
+    // HEADERS: Force double newline + ##
+    if (/^h[1-6]$/.test(tag)) text += '\n\n## ';
+    
+    // BOLD used as Header: (Common in Gemini)
+    // If a line is JUST bold text, treat it as a header
+    if ((tag === 'strong' || tag === 'b') && node.parentElement.tagName === 'P') {
+       // We'll let the text traverse, but we might want to flag it. 
+       // For now, simple bold marker ** is safest.
+       text += '**';
+    } else if (tag === 'strong' || tag === 'b') {
+       text += '**';
+    }
+
+    // LISTS: Force Newline + Bullet
+    if (tag === 'li') text += '\n• ';
+    
+    // PARAGRAPHS
+    if (tag === 'p' || tag === 'div' || tag === 'br') text += '\n';
+
+    // TABLE FALLBACK
     if (tag === 'table') {
-      text += '\n\n[TABLE]:\n';
+      text += '\n[TABLE_GRID]\n'; // Marker for table
       node.querySelectorAll('tr').forEach(tr => {
-        text += '| ';
         tr.querySelectorAll('td, th').forEach(cell => {
-          text += cell.innerText.trim() + ' | ';
+           text += cell.innerText.trim() + ' | ';
         });
         text += '\n';
       });
-      text += '\n';
-      return; // Don't process children
+      return;
     }
-    
-    // --- FORMATTING MARKERS ---
-    const isHeader = /^h[1-6]$/.test(tag);
-    const isBold = tag === 'strong' || tag === 'b';
-    
-    if (isHeader) text += '\n\n## ';  // Header marker
-    if (tag === 'li') text += '\n• '; // Bullet marker
-    if (isBold) text += '**';         // Bold marker
-    if (tag === 'br' || tag === 'p') text += '\n';
-    if (tag === 'div' && text.length > 0 && !text.endsWith('\n')) text += '\n';
-    
-    // Recurse through children
+
+    // RECURSE
     for (const child of node.childNodes) {
       traverse(child);
     }
-    
-    // Close formatting markers
-    if (isBold) text += '**';
-    if (isHeader) text += '\n';
+
+    // CLOSE TAGS
+    if (tag === 'strong' || tag === 'b') text += '**';
   }
-  
+
   traverse(element);
   
-  // Final cleanup of extra whitespace
+  // Cleanup: Remove excessive newlines that create huge gaps
   return { 
     text: text.replace(/\n{3,}/g, '\n\n').trim(), 
     images, 
@@ -728,7 +712,7 @@ async function extractGeminiContent() {
     const el = msg.el;
     
     // Use the STABLE text-marker parser (## for headers, • for bullets)
-    const { text, images, codeBlocks } = parseDomContent(el);
+    const { text, images, codeBlocks } = parseDomToText(el);
     
     // For Gemini user messages, search more thoroughly for images
     let additionalImages = await extractImages(el, msg.role);
@@ -1789,7 +1773,7 @@ async function extractClaudeContent() {
     const el = msg.el;
     
     // Use the STABLE text-marker parser (## for headers, • for bullets)
-    const { text, images, codeBlocks } = parseDomContent(el);
+    const { text, images, codeBlocks } = parseDomToText(el);
     
     // Skip if text became empty after parsing
     if (!text || text.length < 5) continue;
@@ -1862,7 +1846,7 @@ async function extractChatGPTContent() {
     
     if (contentNode) {
       // Use the STABLE text-marker parser (## for headers, • for bullets)
-      const { text, images, codeBlocks } = parseDomContent(contentNode);
+      const { text, images, codeBlocks } = parseDomToText(contentNode);
       
       // SPECIAL: Search for DALL-E / File Upload / Grid images in the article
       const extraImageSelectors = [
