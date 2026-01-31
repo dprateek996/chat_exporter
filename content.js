@@ -422,7 +422,17 @@ async function extractGeminiContent() {
     }
     
     // Extract images - for user messages, look in the message element itself first
+    // Use a Set to track already-captured image sources to prevent duplicates
+    const capturedImageSrcs = new Set();
     let images = await extractImages(el, msg.role);
+    
+    // Deduplicate images by source URL
+    images = images.filter(img => {
+      const src = img.src || img.base64?.substring(0, 100) || '';
+      if (capturedImageSrcs.has(src)) return false;
+      capturedImageSrcs.add(src);
+      return true;
+    });
     
     // For Gemini user messages, search more thoroughly for images
     if (msg.role === 'user' && images.length === 0) {
@@ -1751,28 +1761,234 @@ function generatePDFInContentScript(data) {
       }
     };
     
-    // Parse **bold** markers
+    // Parse **bold** markers - returns array of {text, bold} segments
+    // Handles edge cases like unmatched asterisks
     const parseBold = (text) => {
+      if (!text) return [{ text: '', bold: false }];
+      
       const parts = [];
       let rest = text;
       let bold = false;
-      while (rest.length > 0) {
+      let iterations = 0;
+      const maxIterations = 100; // Safety limit
+      
+      while (rest.length > 0 && iterations < maxIterations) {
+        iterations++;
         const idx = rest.indexOf('**');
         if (idx === -1) {
-          if (rest) parts.push({ text: rest, bold });
+          // No more ** markers - add remaining text
+          if (rest) {
+            // Strip any orphan single asterisks that might be formatting artifacts
+            const cleaned = rest.replace(/^\*\s+/, '').replace(/\s+\*$/, '');
+            parts.push({ text: cleaned, bold });
+          }
           break;
         }
-        if (idx > 0) parts.push({ text: rest.substring(0, idx), bold });
+        if (idx > 0) {
+          parts.push({ text: rest.substring(0, idx), bold });
+        }
         bold = !bold;
         rest = rest.substring(idx + 2);
       }
+      
+      // If we ended up in bold state (unmatched **), close it out
+      if (bold && rest.length > 0) {
+        parts.push({ text: rest, bold: false });
+      }
+      
+      // If no parts were created, return the original text as plain
+      if (parts.length === 0) {
+        return [{ text: text.replace(/\*\*/g, ''), bold: false }];
+      }
+      
       return parts;
     };
     
-    // Render text with inline bold - returns height used
-    const renderBoldText = (text, x, maxW, color, fontSize, lineH, startY) => {
+    // ========== FORMATTING ENGINE: Parse raw text into structured elements ==========
+    // This converts markdown-style text into a proper structure for rendering
+    // Converts: **Bold** -> heading, * item -> bullet, etc.
+    const parseMessageContent = (rawText) => {
+      if (!rawText) return [];
+      
+      const elements = [];
+      const lines = rawText.split('\n');
+      let i = 0;
+      
+      while (i < lines.length) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        
+        // Skip image placeholders (handled separately)
+        if (trimmed.match(/^<<<IMG:\d+>>>$/)) {
+          i++;
+          continue;
+        }
+        
+        // Empty line = paragraph break
+        if (!trimmed) {
+          elements.push({ type: 'break' });
+          i++;
+          continue;
+        }
+        
+        // Code block start
+        if (trimmed.match(/^<<<CODE:?(.*)>>>$/i)) {
+          const lang = trimmed.match(/^<<<CODE:?(.*)>>>$/i)?.[1] || '';
+          const codeLines = [];
+          i++;
+          while (i < lines.length && !lines[i].match(/^<<<\/CODE>>>$/i)) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          elements.push({ type: 'code', language: lang, content: codeLines.join('\n') });
+          i++; // skip closing tag
+          continue;
+        }
+        
+        // Markdown headers: # ## ###
+        const headerMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
+        if (headerMatch) {
+          const level = headerMatch[1].length;
+          // Strip any remaining ** from header content
+          const headerContent = headerMatch[2].replace(/\*\*/g, '');
+          elements.push({ type: 'heading', level, content: headerContent });
+          i++;
+          continue;
+        }
+        
+        // Bold heading pattern 1: **Text:** (colon inside asterisks)
+        const boldHeading1 = trimmed.match(/^\*\*([^*]+):\*\*\s*(.*)$/);
+        if (boldHeading1) {
+          elements.push({ type: 'heading', level: 3, content: boldHeading1[1].trim() + ':' });
+          if (boldHeading1[2]?.trim()) {
+            elements.push({ type: 'paragraph', content: boldHeading1[2].trim() });
+          }
+          i++;
+          continue;
+        }
+        
+        // Bold heading pattern 2: **Text**: (colon outside asterisks)
+        const boldHeading2 = trimmed.match(/^\*\*([^*]+)\*\*:\s*(.*)$/);
+        if (boldHeading2) {
+          elements.push({ type: 'heading', level: 3, content: boldHeading2[1].trim() + ':' });
+          if (boldHeading2[2]?.trim()) {
+            elements.push({ type: 'paragraph', content: boldHeading2[2].trim() });
+          }
+          i++;
+          continue;
+        }
+        
+        // Bold heading pattern 3: **Text** alone on a line (no colon, treated as subheading)
+        const boldHeading3 = trimmed.match(/^\*\*([^*]+)\*\*\s*$/);
+        if (boldHeading3 && !trimmed.match(/^[-*•]\s+/)) {
+          elements.push({ type: 'heading', level: 3, content: boldHeading3[1].trim() });
+          i++;
+          continue;
+        }
+        
+        // Bullet list: collect consecutive bullet items
+        if (trimmed.match(/^[-*•]\s+/)) {
+          const listItems = [];
+          while (i < lines.length) {
+            const bulletLine = lines[i].trim();
+            
+            // Main bullet item
+            const bulletMatch = bulletLine.match(/^[-*•]\s+(.+)$/);
+            if (bulletMatch) {
+              // Check for bold label pattern: **Label:** description
+              const boldLabel1 = bulletMatch[1].match(/^\*\*([^*]+):\*\*\s*(.*)$/);
+              const boldLabel2 = bulletMatch[1].match(/^\*\*([^*]+)\*\*:\s*(.*)$/);
+              const boldLabelMatch = boldLabel1 || boldLabel2;
+              
+              if (boldLabelMatch) {
+                listItems.push({
+                  label: boldLabelMatch[1].trim() + ':',
+                  content: boldLabelMatch[2]?.trim() || '',
+                  nested: []
+                });
+              } else {
+                listItems.push({
+                  content: bulletMatch[1],
+                  nested: []
+                });
+              }
+              i++;
+              
+              // Check for nested bullets
+              while (i < lines.length && lines[i].match(/^\s{2,}[-*•]\s+/)) {
+                const nestedMatch = lines[i].match(/^\s{2,}[-*•]\s+(.+)$/);
+                if (nestedMatch && listItems.length > 0) {
+                  listItems[listItems.length - 1].nested.push(nestedMatch[1]);
+                }
+                i++;
+              }
+              continue;
+            }
+            break;
+          }
+          elements.push({ type: 'list', items: listItems });
+          continue;
+        }
+        
+        // Numbered list: collect consecutive numbered items
+        if (trimmed.match(/^\d+[.)]\s+/)) {
+          const listItems = [];
+          while (i < lines.length) {
+            const numLine = lines[i].trim();
+            const numMatch = numLine.match(/^(\d+)[.)]\s+(.+)$/);
+            if (numMatch) {
+              // Check for bold label pattern
+              const boldLabelMatch = numMatch[2].match(/^\*\*([^*]+):\*\*\s*(.*)$/) ||
+                                      numMatch[2].match(/^\*\*([^*]+)\*\*:\s*(.*)$/);
+              if (boldLabelMatch) {
+                listItems.push({
+                  num: numMatch[1],
+                  label: boldLabelMatch[1].trim() + ':',
+                  content: boldLabelMatch[2]?.trim() || ''
+                });
+              } else {
+                listItems.push({
+                  num: numMatch[1],
+                  content: numMatch[2]
+                });
+              }
+              i++;
+              continue;
+            }
+            break;
+          }
+          elements.push({ type: 'numberedList', items: listItems });
+          continue;
+        }
+        
+        // Blockquote
+        const quoteMatch = trimmed.match(/^>\s*(.+)$/);
+        if (quoteMatch) {
+          const quoteLines = [quoteMatch[1]];
+          i++;
+          while (i < lines.length && lines[i].trim().match(/^>\s*/)) {
+            quoteLines.push(lines[i].trim().replace(/^>\s*/, ''));
+            i++;
+          }
+          elements.push({ type: 'quote', content: quoteLines.join(' ') });
+          continue;
+        }
+        
+        // Regular paragraph
+        elements.push({ type: 'paragraph', content: line });
+        i++;
+      }
+      
+      return elements;
+    };
+    
+    // ========== ELEMENT RENDERERS ==========
+    
+    // Render text with inline **bold** formatting - returns height used
+    const renderFormattedText = (text, x, maxW, color, fontSize, lineH, startY) => {
       let localY = startY;
       
+      // Strip bold markers for plain text
       if (!text.includes('**')) {
         pdf.setFont('helvetica', 'normal');
         pdf.setFontSize(fontSize);
@@ -1785,32 +2001,329 @@ function generatePDFInContentScript(data) {
         return localY - startY;
       }
       
+      // Parse bold segments
       const parts = parseBold(text);
       const plain = parts.map(p => p.text).join('');
+      pdf.setFont('helvetica', 'normal');
       pdf.setFontSize(fontSize);
       const wrapped = pdf.splitTextToSize(plain, maxW);
       
+      // Track position through parts
+      let partIndex = 0;
+      let charOffset = 0;
+      
       for (const line of wrapped) {
         let cx = x;
-        let ci = 0;
-        for (const part of parts) {
+        let lineCharsRemaining = line.length;
+        
+        while (lineCharsRemaining > 0 && partIndex < parts.length) {
+          const part = parts[partIndex];
+          const partRemaining = part.text.length - charOffset;
+          const charsToRender = Math.min(partRemaining, lineCharsRemaining);
+          const segment = part.text.substring(charOffset, charOffset + charsToRender);
+          
           pdf.setFont('helvetica', part.bold ? 'bold' : 'normal');
           pdf.setFontSize(fontSize);
           pdf.setTextColor(...color);
-          let seg = '';
-          for (let i = 0; i < part.text.length && ci < line.length; i++) {
-            if (part.text[i] === line[ci]) {
-              seg += line[ci];
-              ci++;
-            }
-          }
-          if (seg) {
-            pdf.text(seg, cx, localY);
-            cx += pdf.getTextWidth(seg);
+          pdf.text(segment, cx, localY);
+          cx += pdf.getTextWidth(segment);
+          
+          lineCharsRemaining -= charsToRender;
+          charOffset += charsToRender;
+          
+          if (charOffset >= part.text.length) {
+            partIndex++;
+            charOffset = 0;
           }
         }
         localY += lineH;
       }
+      
+      return localY - startY;
+    };
+    
+    // Render a heading element - strips any remaining ** markers
+    const renderHeading = (element, x, maxW, startY) => {
+      let localY = startY + spacing.headingMarginTop;
+      
+      const level = element.level || 1;
+      const fontSize = level === 1 ? font.heading1 : (level === 2 ? font.heading2 : font.heading3);
+      const lineH = level === 1 ? font.heading1Line : (level === 2 ? font.heading2Line : font.heading3Line);
+      
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(fontSize);
+      pdf.setTextColor(...colors.headingText);
+      
+      // Strip any remaining ** markers from heading content
+      const cleanContent = element.content.replace(/\*\*/g, '');
+      const lines = pdf.splitTextToSize(cleanContent, maxW);
+      lines.forEach(l => {
+        pdf.text(l, x, localY);
+        localY += lineH;
+      });
+      
+      localY += spacing.headingMarginBottom;
+      return localY - startY;
+    };
+    
+    // Render a paragraph element
+    const renderParagraph = (element, x, maxW, color, startY) => {
+      const height = renderFormattedText(element.content, x, maxW, color, font.body, font.bodyLine, startY);
+      return height + spacing.paragraphMarginBottom;
+    };
+    
+    // Render a bullet list element
+    const renderBulletList = (element, x, maxW, color, startY) => {
+      let localY = startY;
+      const indent = 16;
+      const nestedIndent = 14;
+      
+      for (const item of element.items) {
+        // Draw bullet
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(font.body);
+        pdf.setTextColor(...color);
+        pdf.text('•', x, localY);
+        
+        if (item.label) {
+          // Bold label: "**Label:** content"
+          pdf.setFont('helvetica', 'bold');
+          pdf.text(item.label, x + indent, localY);
+          const labelWidth = pdf.getTextWidth(item.label);
+          
+          if (item.content) {
+            pdf.setFont('helvetica', 'normal');
+            const remainingW = maxW - indent - labelWidth - 4;
+            if (pdf.getTextWidth(item.content) <= remainingW) {
+              // Fits on same line
+              pdf.text(item.content, x + indent + labelWidth + 4, localY);
+              localY += font.bodyLine;
+            } else {
+              // Wrap to next line
+              localY += font.bodyLine;
+              const height = renderFormattedText(item.content, x + indent, maxW - indent, color, font.body, font.bodyLine, localY);
+              localY += height;
+            }
+          } else {
+            localY += font.bodyLine;
+          }
+        } else {
+          // Regular content with inline bold support
+          const height = renderFormattedText(item.content, x + indent, maxW - indent, color, font.body, font.bodyLine, localY);
+          localY += height;
+        }
+        
+        // Nested items
+        for (const nested of item.nested || []) {
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(font.body);
+          pdf.setTextColor(...color);
+          pdf.text('◦', x + indent, localY);
+          
+          const height = renderFormattedText(nested, x + indent + nestedIndent, maxW - indent - nestedIndent, color, font.body, font.bodyLine, localY);
+          localY += height + spacing.listItemMarginBottom;
+        }
+        
+        localY += spacing.listItemMarginBottom;
+      }
+      
+      return localY - startY;
+    };
+    
+    // Render a numbered list element
+    const renderNumberedList = (element, x, maxW, color, startY) => {
+      let localY = startY;
+      const indent = 20;
+      
+      for (const item of element.items) {
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(font.body);
+        pdf.setTextColor(...color);
+        pdf.text(`${item.num}.`, x, localY);
+        
+        if (item.label) {
+          // Bold label
+          pdf.setFont('helvetica', 'bold');
+          pdf.text(item.label, x + indent, localY);
+          const labelWidth = pdf.getTextWidth(item.label);
+          
+          if (item.content) {
+            pdf.setFont('helvetica', 'normal');
+            const remainingW = maxW - indent - labelWidth - 4;
+            if (pdf.getTextWidth(item.content) <= remainingW) {
+              pdf.text(item.content, x + indent + labelWidth + 4, localY);
+              localY += font.bodyLine;
+            } else {
+              localY += font.bodyLine;
+              const height = renderFormattedText(item.content, x + indent, maxW - indent, color, font.body, font.bodyLine, localY);
+              localY += height;
+            }
+          } else {
+            localY += font.bodyLine;
+          }
+        } else {
+          const height = renderFormattedText(item.content, x + indent, maxW - indent, color, font.body, font.bodyLine, localY);
+          localY += height;
+        }
+        
+        localY += spacing.listItemMarginBottom;
+      }
+      
+      return localY - startY;
+    };
+    
+    // Render a code block element
+    const renderCodeBlock = (element, x, maxW, startY) => {
+      let localY = startY + spacing.codeMarginY;
+      
+      // Draw background
+      const codeLines = element.content.split('\n');
+      const codeHeight = codeLines.length * font.codeLine + 16;
+      
+      pdf.setFillColor(...colors.codeBg);
+      pdf.setDrawColor(...colors.codeBorder);
+      pdf.setLineWidth(0.5);
+      pdf.roundedRect(x - 8, localY - 8, maxW + 16, codeHeight, 4, 4, 'FD');
+      
+      // Language label
+      if (element.language) {
+        pdf.setFont('courier', 'normal');
+        pdf.setFontSize(font.meta);
+        pdf.setTextColor(...colors.meta);
+        pdf.text(element.language.toLowerCase(), x, localY);
+        localY += 12;
+      }
+      
+      // Code content
+      pdf.setFont('courier', 'normal');
+      pdf.setFontSize(font.code);
+      pdf.setTextColor(...colors.aiText);
+      
+      for (const codeLine of codeLines) {
+        const truncated = codeLine.length > 75 ? codeLine.substring(0, 72) + '...' : codeLine;
+        pdf.text(truncated, x, localY);
+        localY += font.codeLine;
+      }
+      
+      localY += spacing.codeMarginY;
+      return localY - startY;
+    };
+    
+    // Render a blockquote element
+    const renderQuote = (element, x, maxW, startY) => {
+      let localY = startY + 4;
+      
+      // Vertical bar
+      pdf.setDrawColor(...colors.aiBorder);
+      pdf.setLineWidth(2);
+      
+      pdf.setFont('helvetica', 'italic');
+      pdf.setFontSize(font.body);
+      pdf.setTextColor(...colors.meta);
+      
+      const lines = pdf.splitTextToSize(element.content, maxW - 16);
+      const barHeight = lines.length * font.bodyLine;
+      pdf.line(x, localY - 4, x, localY + barHeight);
+      
+      lines.forEach(l => {
+        pdf.text(l, x + 14, localY);
+        localY += font.bodyLine;
+      });
+      
+      localY += spacing.paragraphMarginBottom;
+      return localY - startY;
+    };
+    
+    // Calculate height for all elements (for bubble sizing)
+    const calculateElementsHeight = (elements, maxW) => {
+      let height = 0;
+      
+      for (const el of elements) {
+        switch (el.type) {
+          case 'break':
+            height += 6;
+            break;
+          case 'heading':
+            height += spacing.headingMarginTop;
+            const hLevel = el.level || 1;
+            const hFont = hLevel === 1 ? font.heading1 : (hLevel === 2 ? font.heading2 : font.heading3);
+            const hLine = hLevel === 1 ? font.heading1Line : (hLevel === 2 ? font.heading2Line : font.heading3Line);
+            pdf.setFontSize(hFont);
+            const hLines = pdf.splitTextToSize(el.content, maxW);
+            height += hLines.length * hLine + spacing.headingMarginBottom;
+            break;
+          case 'paragraph':
+            pdf.setFontSize(font.body);
+            const pText = el.content.replace(/\*\*/g, '');
+            const pLines = pdf.splitTextToSize(pText, maxW);
+            height += pLines.length * font.bodyLine + spacing.paragraphMarginBottom;
+            break;
+          case 'list':
+            for (const item of el.items) {
+              pdf.setFontSize(font.body);
+              const content = (item.label || '') + ' ' + (item.content || '');
+              const itemLines = pdf.splitTextToSize(content.replace(/\*\*/g, ''), maxW - 16);
+              height += itemLines.length * font.bodyLine + spacing.listItemMarginBottom;
+              for (const nested of item.nested || []) {
+                const nestedLines = pdf.splitTextToSize(nested.replace(/\*\*/g, ''), maxW - 30);
+                height += nestedLines.length * font.bodyLine + spacing.listItemMarginBottom;
+              }
+            }
+            break;
+          case 'numberedList':
+            for (const item of el.items) {
+              pdf.setFontSize(font.body);
+              const content = (item.label || '') + ' ' + (item.content || '');
+              const itemLines = pdf.splitTextToSize(content.replace(/\*\*/g, ''), maxW - 20);
+              height += itemLines.length * font.bodyLine + spacing.listItemMarginBottom;
+            }
+            break;
+          case 'code':
+            const codeLines = el.content.split('\n');
+            height += spacing.codeMarginY * 2 + codeLines.length * font.codeLine + 16;
+            if (el.language) height += 12;
+            break;
+          case 'quote':
+            pdf.setFontSize(font.body);
+            const qLines = pdf.splitTextToSize(el.content, maxW - 16);
+            height += qLines.length * font.bodyLine + spacing.paragraphMarginBottom + 8;
+            break;
+        }
+      }
+      
+      return height;
+    };
+    
+    // Render all elements in sequence
+    const renderElements = (elements, x, maxW, color, startY) => {
+      let localY = startY;
+      
+      for (const el of elements) {
+        switch (el.type) {
+          case 'break':
+            localY += 6;
+            break;
+          case 'heading':
+            localY += renderHeading(el, x, maxW, localY);
+            break;
+          case 'paragraph':
+            localY += renderParagraph(el, x, maxW, color, localY);
+            break;
+          case 'list':
+            localY += renderBulletList(el, x, maxW, color, localY);
+            break;
+          case 'numberedList':
+            localY += renderNumberedList(el, x, maxW, color, localY);
+            break;
+          case 'code':
+            localY += renderCodeBlock(el, x, maxW, localY);
+            break;
+          case 'quote':
+            localY += renderQuote(el, x, maxW, localY);
+            break;
+        }
+      }
+      
       return localY - startY;
     };
     
@@ -1840,15 +2353,37 @@ function generatePDFInContentScript(data) {
     pdf.line(marginLeft, y, pageWidth - marginRight, y);
     y += 24;
     
-    // ========== MESSAGES - CONTINUOUS FLOW ==========
+    // ========== MESSAGES - CONTINUOUS FLOW WITH PARSING ENGINE ==========
+    
+    // Global image tracking to prevent same image appearing multiple times across messages
+    const globalRenderedImages = new Set();
+    
+    // Pre-process text to clean markdown artifacts
+    const cleanMarkdown = (text) => {
+      if (!text) return '';
+      return text
+        // Remove source/citation tags that Gemini sometimes adds
+        .replace(/<source[^>]*>[\s\S]*?<\/source>/gi, '')
+        .replace(/\[source[^\]]*\]/gi, '')
+        // Normalize different types of dashes
+        .replace(/[–—]/g, '-')
+        // Remove zero-width characters
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+        // Normalize multiple spaces
+        .replace(/  +/g, ' ')
+        // Fix common broken bold patterns
+        .replace(/\*\s+\*\*/g, '**')  // * ** -> **
+        .replace(/\*\*\s+\*/g, '**')  // ** * -> **
+        .trim();
+    };
     
     for (let msgIdx = 0; msgIdx < data.messages.length; msgIdx++) {
       const msg = data.messages[msgIdx];
       if (!msg.text && (!msg.images || msg.images.length === 0)) continue;
       
-      let text = sanitize(msg.text) || '';
+      let text = cleanMarkdown(sanitize(msg.text) || '');
       
-      // Replace code block placeholders
+      // Replace code block placeholders with parseable format
       if (msg.codeBlocks?.length) {
         msg.codeBlocks.forEach(b => {
           const code = sanitize(b.code);
@@ -1863,10 +2398,11 @@ function generatePDFInContentScript(data) {
       const bubbleMaxW = bubble.maxWidth;
       const textMaxW = bubbleMaxW - (bubble.paddingH * 2);
       
-      // ========== CALCULATE BUBBLE HEIGHT WITH SEMANTIC SPACING ==========
+      // ========== PARSE MESSAGE INTO STRUCTURED ELEMENTS ==========
+      const elements = parseMessageContent(text);
+      
+      // ========== CALCULATE BUBBLE HEIGHT ==========
       let contentHeight = 0;
-      const lines = text.split('\n');
-      let prevLineType = null; // Track previous line type for proper spacing
       
       // User images first
       if (isUser && images.length) {
@@ -1880,60 +2416,8 @@ function generatePDFInContentScript(data) {
         });
       }
       
-      // Parse each line for height calculation
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        
-        if (!line.trim()) {
-          contentHeight += 6; // Empty line spacing
-          continue;
-        }
-        
-        if (line.match(/^<<<IMG:(\d+)>>>$/)) continue;
-        
-        // Code block
-        if (line.match(/^<<<CODE:/)) {
-          if (prevLineType) contentHeight += spacing.codeMarginY;
-          contentHeight += 20;
-          prevLineType = 'code-start';
-          continue;
-        }
-        if (line.match(/^<<<\/CODE>>>$/)) {
-          contentHeight += spacing.codeMarginY;
-          prevLineType = 'code-end';
-          continue;
-        }
-        
-        // Headers
-        if (line.match(/^#{1,3}\s+/)) {
-          contentHeight += spacing.headingMarginTop;
-          pdf.setFontSize(font.heading1);
-          const wrapped = pdf.splitTextToSize(line.replace(/^#+\s+/, ''), textMaxW);
-          contentHeight += wrapped.length * font.heading1Line;
-          contentHeight += spacing.headingMarginBottom;
-          prevLineType = 'heading';
-          continue;
-        }
-        
-        // Bullet / numbered list
-        if (line.match(/^[-*•]\s+/) || line.match(/^\d+[.)]\s+/) || line.match(/^\s{2,}[-*•]\s+/)) {
-          pdf.setFontSize(font.body);
-          const content = line.replace(/^[\s\-*•\d.)\]]+/, '');
-          const wrapped = pdf.splitTextToSize(content, textMaxW - 20);
-          contentHeight += wrapped.length * font.bodyLine + spacing.listItemMarginBottom;
-          prevLineType = 'list';
-          continue;
-        }
-        
-        // Regular paragraph
-        pdf.setFontSize(font.body);
-        const wrapped = pdf.splitTextToSize(line, textMaxW);
-        contentHeight += wrapped.length * font.bodyLine;
-        if (prevLineType === 'paragraph' || !prevLineType) {
-          contentHeight += spacing.paragraphMarginBottom;
-        }
-        prevLineType = 'paragraph';
-      }
+      // Calculate height from parsed elements
+      contentHeight += calculateElementsHeight(elements, textMaxW);
       
       // AI images at end
       if (!isUser && images.length) {
@@ -1963,15 +2447,24 @@ function generatePDFInContentScript(data) {
       // Draw bubble background
       drawBubble(bubbleX, bubbleY, bubbleW, bubbleH, isUser);
       
-      // ========== RENDER CONTENT WITH SEMANTIC HIERARCHY ==========
+      // ========== RENDER CONTENT USING PARSING ENGINE ==========
       let contentY = bubbleY + bubble.padding + 12;
       const contentX = bubbleX + bubble.paddingH;
-      let lastElementType = null;
+      
+      // Track rendered images to prevent duplicates within this message AND globally
+      const renderedImageHashes = new Set();
       
       // User images first
       if (isUser && images.length) {
         for (const imgData of images) {
           if (imgData?.base64) {
+            // Create a hash from the first 200 chars of base64 to detect duplicates
+            const imgHash = imgData.base64.substring(0, 200);
+            // Check both local and global sets
+            if (renderedImageHashes.has(imgHash) || globalRenderedImages.has(imgHash)) continue;
+            renderedImageHashes.add(imgHash);
+            globalRenderedImages.add(imgHash);
+            
             let iw = Math.min(imgData.width || 200, textMaxW);
             let ih = (imgData.height || 150) * (iw / (imgData.width || 200));
             if (ih > 180) { ih = 180; iw = (imgData.width || 200) * (ih / (imgData.height || 150)); }
@@ -1989,192 +2482,19 @@ function generatePDFInContentScript(data) {
         }
       }
       
-      // Render text with proper semantic spacing
-      let inCode = false;
-      
-      for (let li = 0; li < lines.length; li++) {
-        const line = lines[li];
-        
-        if (line.match(/^<<<IMG:(\d+)>>>$/)) continue;
-        
-        // Empty line
-        if (!line.trim()) {
-          contentY += 6;
-          continue;
-        }
-        
-        // ===== CODE BLOCK START =====
-        if (line.match(/^<<<CODE:?(.*)>>>$/i)) {
-          inCode = true;
-          const codeLang = line.match(/^<<<CODE:?(.*)>>>$/i)?.[1] || '';
-          
-          // margin-top before code
-          if (lastElementType) contentY += spacing.codeMarginY;
-          
-          // Draw code block container
-          const codeStartY = contentY - 4;
-          
-          // Language label
-          if (codeLang) {
-            pdf.setFont('courier', 'normal');
-            pdf.setFontSize(font.meta);
-            pdf.setTextColor(...colors.meta);
-            pdf.text(codeLang.toLowerCase(), contentX + 12, contentY + 4);
-            contentY += 14;
-          }
-          
-          lastElementType = 'code';
-          continue;
-        }
-        
-        // ===== CODE BLOCK END =====
-        if (line.match(/^<<<\/CODE>>>$/i)) {
-          inCode = false;
-          contentY += spacing.codeMarginY;
-          lastElementType = 'code';
-          continue;
-        }
-        
-        // ===== CODE CONTENT =====
-        if (inCode) {
-          // Light background with border
-          pdf.setFillColor(...colors.codeBg);
-          pdf.setDrawColor(...colors.codeBorder);
-          pdf.setLineWidth(0.5);
-          pdf.rect(contentX - 12, contentY - 10, textMaxW + 24, font.codeLine + 4, 'F');
-          
-          pdf.setFont('courier', 'normal');
-          pdf.setFontSize(font.code);
-          pdf.setTextColor(...colors.aiText);
-          let codeLine = line.length > 75 ? line.substring(0, 72) + '...' : line;
-          pdf.text(codeLine, contentX, contentY);
-          contentY += font.codeLine;
-          continue;
-        }
-        
-        // ===== HEADINGS (h1, h2, h3) - margin: 18px 0 8px 0 =====
-        const h1Match = line.match(/^#{1,2}\s+(.+)$/);
-        if (h1Match) {
-          contentY += spacing.headingMarginTop;
-          pdf.setFont('helvetica', 'bold');
-          pdf.setFontSize(font.heading1);
-          pdf.setTextColor(...colors.headingText);
-          const hLines = pdf.splitTextToSize(sanitize(h1Match[1]), textMaxW);
-          hLines.forEach(hl => {
-            pdf.text(hl, contentX, contentY);
-            contentY += font.heading1Line;
-          });
-          contentY += spacing.headingMarginBottom;
-          lastElementType = 'heading';
-          continue;
-        }
-        
-        const h3Match = line.match(/^#{3,}\s+(.+)$/);
-        if (h3Match) {
-          contentY += spacing.headingMarginTop - 4;
-          pdf.setFont('helvetica', 'bold');
-          pdf.setFontSize(font.heading2);
-          pdf.setTextColor(...colors.headingText);
-          const hLines = pdf.splitTextToSize(sanitize(h3Match[1]), textMaxW);
-          hLines.forEach(hl => {
-            pdf.text(hl, contentX, contentY);
-            contentY += font.heading2Line;
-          });
-          contentY += spacing.headingMarginBottom - 2;
-          lastElementType = 'heading';
-          continue;
-        }
-        
-        // ===== NUMBERED LISTS - margin-left: 20px, li margin-bottom: 6px =====
-        const numMatch = line.match(/^(\d+)[.)]\s+(.+)$/);
-        if (numMatch) {
-          pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(font.body);
-          pdf.setTextColor(...textColor);
-          
-          // Number with proper indent
-          pdf.text(`${numMatch[1]}.`, contentX, contentY);
-          
-          const numContent = sanitize(numMatch[2]);
-          const numLines = pdf.splitTextToSize(numContent, textMaxW - 20);
-          numLines.forEach((nl, idx) => {
-            pdf.text(nl, contentX + 20, contentY + (idx * font.bodyLine));
-          });
-          contentY += numLines.length * font.bodyLine + spacing.listItemMarginBottom;
-          lastElementType = 'list';
-          continue;
-        }
-        
-        // ===== BULLET POINTS - list-style-position: outside, 1.2em indent =====
-        const bulletMatch = line.match(/^[-*•]\s+(.+)$/);
-        if (bulletMatch) {
-          pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(font.body);
-          pdf.setTextColor(...textColor);
-          
-          // Bullet outside, text indented
-          pdf.text('•', contentX, contentY);
-          
-          const bulletContent = sanitize(bulletMatch[1]);
-          const bLines = pdf.splitTextToSize(bulletContent, textMaxW - 14);
-          bLines.forEach((bl, idx) => {
-            pdf.text(bl, contentX + 14, contentY + (idx * font.bodyLine));
-          });
-          contentY += bLines.length * font.bodyLine + spacing.listItemMarginBottom;
-          lastElementType = 'list';
-          continue;
-        }
-        
-        // ===== SUB-BULLETS (nested) =====
-        const subMatch = line.match(/^\s{2,}[-*•]\s+(.+)$/);
-        if (subMatch) {
-          pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(font.body);
-          pdf.setTextColor(...textColor);
-          
-          pdf.text('◦', contentX + 14, contentY);
-          
-          const subContent = sanitize(subMatch[1]);
-          const sLines = pdf.splitTextToSize(subContent, textMaxW - 28);
-          sLines.forEach((sl, idx) => {
-            pdf.text(sl, contentX + 26, contentY + (idx * font.bodyLine));
-          });
-          contentY += sLines.length * font.bodyLine + spacing.listItemMarginBottom;
-          lastElementType = 'list';
-          continue;
-        }
-        
-        // ===== BLOCKQUOTES =====
-        const quoteMatch = line.match(/^>\s*(.+)$/);
-        if (quoteMatch) {
-          contentY += 4;
-          pdf.setDrawColor(...colors.aiBorder);
-          pdf.setLineWidth(2);
-          pdf.line(contentX, contentY - 10, contentX, contentY + 6);
-          
-          pdf.setFont('helvetica', 'italic');
-          pdf.setFontSize(font.body);
-          pdf.setTextColor(...colors.meta);
-          const qLines = pdf.splitTextToSize(sanitize(quoteMatch[1]), textMaxW - 16);
-          qLines.forEach(ql => {
-            pdf.text(ql, contentX + 14, contentY);
-            contentY += font.bodyLine;
-          });
-          contentY += spacing.paragraphMarginBottom;
-          lastElementType = 'quote';
-          continue;
-        }
-        
-        // ===== REGULAR PARAGRAPH - margin-bottom: 12px =====
-        const height = renderBoldText(line, contentX, textMaxW, textColor, font.body, font.bodyLine, contentY);
-        contentY += height + spacing.paragraphMarginBottom;
-        lastElementType = 'paragraph';
-      }
+      // Render all parsed elements
+      contentY += renderElements(elements, contentX, textMaxW, textColor, contentY);
       
       // AI images at end
       if (!isUser && images.length) {
         for (const imgData of images) {
           if (imgData?.base64) {
+            // Check for duplicate using hash - both local and global
+            const imgHash = imgData.base64.substring(0, 200);
+            if (renderedImageHashes.has(imgHash) || globalRenderedImages.has(imgHash)) continue;
+            renderedImageHashes.add(imgHash);
+            globalRenderedImages.add(imgHash);
+            
             let iw = Math.min(imgData.width || 300, textMaxW);
             let ih = (imgData.height || 200) * (iw / (imgData.width || 300));
             if (ih > 220) { ih = 220; iw = (imgData.width || 300) * (ih / (imgData.height || 200)); }
