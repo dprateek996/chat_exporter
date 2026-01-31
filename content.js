@@ -1,100 +1,104 @@
 // ============================================
-// CONTENT SCRIPT: COMPLETE CHAT EXPORTER (BLOCK-BASED)
+// CONTENT SCRIPT: FINAL FLOW-BASED RENDERER
 // ============================================
 
-// --- 1. BLOCK EXTRACTOR (THE STRUCTURED FIX) ---
+// --- 1. UTILITIES & IMAGE FETCHING ---
+
+async function getBase64FromUrl(url) {
+  try {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 3000);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(id);
+    const blob = await response.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+function cleanText(text) {
+  if (!text) return '';
+  return text
+    .replace(/\[\s*\d+(?::\d+)?\s*\]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim();
+}
+
+// --- 2. DOM PARSER ---
 
 function parseDomToBlocks(root) {
   const blocks = [];
-
   function traverse(node) {
     if (node.nodeType === Node.TEXT_NODE) {
-      const text = node.textContent.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+      const text = cleanText(node.textContent);
       if (text) blocks.push({ type: 'text', content: text });
       return;
     }
-
     if (node.nodeType !== Node.ELEMENT_NODE) return;
-
     const tag = node.tagName.toLowerCase();
 
-    // --- IMAGES ---
+    if (tag === 'pre') {
+      const codeEl = node.querySelector('code') || node;
+      const lang = (codeEl.className || '').replace('language-', '').toUpperCase() || 'CODE';
+      blocks.push({ type: 'code', lang: lang, content: codeEl.innerText });
+      return;
+    }
     if (tag === 'img') {
-      if (node.width > 50 && !node.src.includes('data:image/svg')) {
+      if (node.width > 40 && !node.src.includes('data:image/svg')) {
         blocks.push({ type: 'image', src: node.src });
       }
       return;
     }
-
-    // --- CODE BLOCKS ---
-    if (tag === 'pre') {
-      const codeEl = node.querySelector('code') || node;
-      const lang = (codeEl.className || '').replace('language-', '') || 'CODE';
-      // Push as a dedicated CODE block
-      blocks.push({ type: 'code', lang: lang.toUpperCase(), content: codeEl.innerText });
-      return; // Don't traverse inside pre
-    }
-
-    // --- HEADERS ---
-    if (/^h[1-6]$/.test(tag)) {
-      blocks.push({ type: 'header', content: node.innerText.trim() });
-      return;
-    }
-
-    // --- LISTS ---
-    if (tag === 'li') {
-      blocks.push({ type: 'bullet', content: node.innerText.trim() });
-      return;
-    }
-
-    // --- TABLE FALLBACK ---
     if (tag === 'table') {
-      let tableText = '[TABLE]\n';
-      node.querySelectorAll('tr').forEach(tr => {
-        tr.querySelectorAll('td, th').forEach(cell => {
-          tableText += cell.innerText.trim() + ' | ';
-        });
-        tableText += '\n';
+      let tableText = '';
+      node.querySelectorAll('tr').forEach((tr, i) => {
+        const cells = Array.from(tr.querySelectorAll('th, td')).map(td => cleanText(td.innerText));
+        tableText += '| ' + cells.join(' | ') + ' |\n';
+        if (i === 0) tableText += '| ' + cells.map(() => '---').join(' | ') + ' |\n';
       });
       blocks.push({ type: 'code', lang: 'TABLE', content: tableText });
       return;
     }
-
-    // Recurse
-    for (const child of node.childNodes) {
-      traverse(child);
+    if (/^h[1-6]$/.test(tag)) {
+      blocks.push({ type: 'header', content: cleanText(node.innerText) });
+      return;
     }
-
-    // Paragraph Breaks
-    if (tag === 'p' || tag === 'div' || tag === 'br') {
-      blocks.push({ type: 'break' });
+    if (tag === 'li') {
+      blocks.push({ type: 'bullet', content: cleanText(node.innerText) });
+      return;
     }
+    for (const child of node.childNodes) traverse(child);
+    if (tag === 'p' || tag === 'div' || tag === 'br') blocks.push({ type: 'break' });
   }
-
   traverse(root);
   return blocks;
 }
 
-// --- 2. EXTRACTORS ---
+// --- 3. EXTRACTORS ---
 
 async function extractGeminiContent() {
-  console.log('🔍 Extracting Gemini...');
   const turns = document.querySelectorAll('message-content, .message-content, [class*="conversation-turn"]');
   const messages = [];
 
   for (const turn of turns) {
     const isUser = turn.closest('.user-message') || turn.hasAttribute('data-is-user');
     const role = isUser ? 'user' : 'assistant';
-
-    // Parse into BLOCKS
     const blocks = parseDomToBlocks(turn);
+    for (const block of blocks) {
+      if (block.type === 'image') block.base64 = await getBase64FromUrl(block.src);
+    }
     if (blocks.length > 0) messages.push({ role, blocks });
   }
   return { title: document.title.replace('Gemini', '').trim(), messages };
 }
 
 async function extractChatGPTContent() {
-  console.log('🔍 Extracting ChatGPT...');
   const articles = document.querySelectorAll('article');
   const messages = [];
 
@@ -105,11 +109,16 @@ async function extractChatGPTContent() {
 
     if (contentNode) {
       const blocks = parseDomToBlocks(contentNode);
-      // Extra Image Check for ChatGPT
       const extraImages = article.querySelectorAll('img[src^="blob:"], .grid img');
-      extraImages.forEach(img => {
-        if (img.width > 100) blocks.push({ type: 'image', src: img.src });
-      });
+      for (const img of extraImages) {
+        if (img.width > 100) {
+          const base64 = await getBase64FromUrl(img.src);
+          blocks.push({ type: 'image', src: img.src, base64: base64 });
+        }
+      }
+      for (const block of blocks) {
+        if (block.type === 'image') block.base64 = await getBase64FromUrl(block.src);
+      }
       messages.push({ role, blocks });
     }
   }
@@ -117,40 +126,32 @@ async function extractChatGPTContent() {
 }
 
 async function extractConversation() {
-  let data = { title: 'Chat Export', messages: [] };
-
-  if (window.location.hostname.includes('gemini.google.com')) {
+  let data;
+  if (window.location.hostname.includes('gemini')) {
     data = await extractGeminiContent();
-  } else if (window.location.hostname.includes('chatgpt.com') || window.location.hostname.includes('openai.com')) {
-    data = await extractChatGPTContent();
-  } else if (window.location.hostname.includes('claude.ai')) {
+  } else if (window.location.hostname.includes('claude')) {
     const elements = document.querySelectorAll('.font-user-message, .font-claude-message');
     const msgs = [];
-    elements.forEach(el => {
+    for (const el of elements) {
       const role = el.classList.contains('font-user-message') ? 'user' : 'assistant';
       const blocks = parseDomToBlocks(el);
       if (blocks.length) msgs.push({ role, blocks });
-    });
+    }
     data = { title: document.title, messages: msgs };
+  } else {
+    data = await extractChatGPTContent();
   }
 
-  // Calculate Stats
-  data.date = new Date().toLocaleDateString();
-  data.stats = {
-    total: data.messages.length,
-    user: data.messages.filter(m => m.role === 'user').length,
-    assistant: data.messages.filter(m => m.role === 'assistant').length,
-    words: data.messages.reduce((acc, m) => acc + (m.blocks ? m.blocks.reduce((w, b) => w + (b.content ? b.content.split(/\s+/).length : 0), 0) : 0), 0)
-  };
-
+  data.date = new Date().toLocaleString();
+  data.stats = { total: data.messages.length };
   return data;
 }
 
-// --- 3. EXPORTERS (CSP BYPASS & BLOCK RENDERER) ---
+// --- 4. FLOW-BASED RENDERER (THE FIX) ---
 
 async function generatePDF(data) {
   const { jsPDF } = window.jspdf || window;
-  if (!jsPDF) { alert("jsPDF library not loaded. Reload extension."); return; }
+  if (!jsPDF) { alert("jsPDF library not loaded."); return; }
 
   const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
   const pageWidth = 595.28;
@@ -158,222 +159,209 @@ async function generatePDF(data) {
   const margin = 36;
   let y = margin;
 
-  // THEME
   const COLORS = {
     userBg: [243, 244, 246], aiBg: [255, 255, 255],
     border: [229, 231, 235], text: [31, 41, 55],
-    codeBg: [40, 44, 52], codeText: [220, 220, 220] // Dark Theme for Code
+    codeBg: [40, 44, 52], codeText: [220, 220, 220]
   };
 
-  const checkPage = (h) => {
-    if (y + h > pageHeight - margin) {
-      pdf.addPage();
-      y = margin;
-      return true;
-    }
-    return false;
-  };
-
-  // HEADER
+  // --- Header ---
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(16);
   pdf.text((data.title || 'Export').substring(0, 50), margin, y);
-  y += 20;
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(10); pdf.setTextColor(100);
-  pdf.text(`${data.date} • ${data.stats.total} Messages`, margin, y);
-  y += 30; pdf.setDrawColor(200); pdf.line(margin, y, pageWidth - margin, y); y += 30;
+  y += 24;
+  pdf.setDrawColor(200);
+  pdf.line(margin, y, pageWidth - margin, y);
+  y += 30;
 
-  // --- MESSAGE LOOP ---
+  // --- Message Loop ---
   for (const msg of data.messages) {
     if (!msg.blocks || msg.blocks.length === 0) continue;
 
     const isUser = msg.role === 'user';
-    const bubbleWidth = 450;
+    const bubbleWidth = 460;
     const x = isUser ? (pageWidth - margin - bubbleWidth) : margin;
     const padding = 20;
-    const contentWidth = bubbleWidth - (padding * 2);
+    const contentWidth = bubbleWidth - (padding * 2.5);
 
-    // 1. CALCULATE HEIGHT (PRE-PASS)
-    let estimatedHeight = 0;
-    pdf.setFontSize(10);
-    pdf.setFont('helvetica', 'normal');
+    // Context for the current message bubble
+    let bubbleStartY = y;
+    let pageItems = []; // buffer for items to draw on current page
 
-    msg.blocks.forEach(block => {
-      if (block.type === 'text') {
-        const lines = pdf.splitTextToSize(block.content, contentWidth);
-        estimatedHeight += (lines.length * 14);
-      }
-      else if (block.type === 'bullet') {
-        const lines = pdf.splitTextToSize(block.content, contentWidth - 15);
-        estimatedHeight += (lines.length * 14) + 5;
-      }
-      else if (block.type === 'header') {
-        estimatedHeight += 25;
-      }
-      else if (block.type === 'code') {
-        const lines = pdf.splitTextToSize(block.content, contentWidth - 20);
-        estimatedHeight += (lines.length * 12) + 20; // + Padding for code box
-      }
-      else if (block.type === 'image') {
-        estimatedHeight += 220;
-      }
-      else if (block.type === 'break') {
-        estimatedHeight += 10;
-      }
-    });
+    // 1. Flush Helper: Draws whatever is in `pageItems` to the PDF
+    const flushPage = () => {
+      if (pageItems.length === 0) return;
 
-    estimatedHeight += (padding * 2);
-    checkPage(estimatedHeight);
+      const bubbleH = y - bubbleStartY + (padding / 2); // slightly pad bottom
 
-    // 2. DRAW BUBBLE BACKGROUND
-    pdf.setFillColor(...(isUser ? COLORS.userBg : COLORS.aiBg));
-    pdf.setDrawColor(...COLORS.border);
-    pdf.roundedRect(x, y, bubbleWidth, estimatedHeight, 8, 8, 'FD');
+      // A. Draw Bubble Background
+      pdf.setFillColor(...(isUser ? COLORS.userBg : COLORS.aiBg));
+      pdf.setDrawColor(...COLORS.border);
+      pdf.roundedRect(x, bubbleStartY, bubbleWidth, bubbleH, 8, 8, 'FD');
 
-    // 3. RENDER CONTENT
-    let cy = y + padding + 10;
-    let cx = x + padding;
+      // B. Draw Groups (Code Backgrounds)
+      let codeGroupStart = null;
+      let codeGroupH = 0;
 
+      const flushCodeGroup = () => {
+        if (codeGroupStart !== null) {
+          pdf.setFillColor(...COLORS.codeBg);
+          // Draw slightly wider than text
+          pdf.rect(x + padding, codeGroupStart - 6, contentWidth, codeGroupH + 12, 'F');
+          codeGroupStart = null;
+          codeGroupH = 0;
+        }
+      };
+
+      // Scan for code items to draw backgrounds
+      pageItems.forEach(item => {
+        if (item.type === 'code_line') {
+          if (codeGroupStart === null) codeGroupStart = item.y;
+          codeGroupH += item.h;
+        } else {
+          flushCodeGroup();
+        }
+      });
+      flushCodeGroup(); // Flush remaining
+
+      // C. Draw Content
+      pageItems.forEach(item => {
+        if (item.type === 'text' || item.type === 'bullet' || item.type === 'header') {
+          pdf.setTextColor(...COLORS.text);
+          pdf.setFont('helvetica', item.style || 'normal');
+          pdf.setFontSize(item.size || 10);
+          pdf.text(item.content, x + padding + (item.indent || 0), item.y);
+        }
+        else if (item.type === 'code_line') {
+          pdf.setTextColor(...COLORS.codeText);
+          pdf.setFont('courier', 'normal');
+          pdf.setFontSize(9);
+          pdf.text(item.content, x + padding + 10, item.y);
+          // Lang label logic could be added here if needed for first line
+        }
+        else if (item.type === 'image' && item.base64) {
+          pdf.addImage(item.base64, 'JPEG', x + padding, item.y, 250, 180);
+        }
+      });
+
+      pageItems = [];
+    };
+
+    // 2. Feed Content Stream
+    // We add padding at start of bubble
+    y += padding;
+
+    // Process all blocks
     for (const block of msg.blocks) {
-      pdf.setTextColor(...COLORS.text);
 
-      // --- RENDER HEADER ---
-      if (block.type === 'header') {
-        pdf.setFont('helvetica', 'bold');
-        pdf.setFontSize(12);
-        pdf.text(block.content, cx, cy);
-        cy += 20;
-      }
-
-      // --- RENDER TEXT ---
-      else if (block.type === 'text') {
+      // -- TEXT --
+      if (block.type === 'text') {
         pdf.setFont('helvetica', 'normal');
         pdf.setFontSize(10);
         const lines = pdf.splitTextToSize(block.content, contentWidth);
+        const lineHeight = 14;
+
         for (const line of lines) {
-          pdf.text(line, cx, cy);
-          cy += 14;
+          if (y + lineHeight > pageHeight - margin) {
+            // Cutoff -> Flush -> New Page
+            flushPage();
+            pdf.addPage();
+            y = margin + padding; // Top padding on new page
+            bubbleStartY = margin;
+          }
+          pageItems.push({ type: 'text', content: line, y: y, size: 10 });
+          y += lineHeight;
         }
       }
 
-      // --- RENDER BULLET ---
+      // -- HEADER --
+      else if (block.type === 'header') {
+        const h = 20;
+        if (y + h > pageHeight - margin) {
+          flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
+        }
+        pageItems.push({ type: 'header', content: block.content, y: y, size: 12, style: 'bold' });
+        y += h + 5;
+      }
+
+      // -- BULLET --
       else if (block.type === 'bullet') {
         pdf.setFont('helvetica', 'normal');
         pdf.setFontSize(10);
-        pdf.text('•', cx, cy);
         const lines = pdf.splitTextToSize(block.content, contentWidth - 15);
-        for (const line of lines) {
-          pdf.text(line, cx + 15, cy);
-          cy += 14;
+        const lineHeight = 14;
+
+        // Draw bullet point on first line
+        if (y + lineHeight > pageHeight - margin) {
+          flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
         }
-        cy += 5;
+        pageItems.push({ type: 'text', content: '•', y: y, size: 10 });
+
+        for (const line of lines) {
+          if (y + lineHeight > pageHeight - margin) {
+            flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
+          }
+          pageItems.push({ type: 'bullet', content: line, y: y, size: 10, indent: 15 });
+          y += lineHeight;
+        }
+        y += 6;
       }
 
-      // --- RENDER CODE ---
+      // -- CODE -- 
       else if (block.type === 'code') {
-        const lines = pdf.splitTextToSize(block.content, contentWidth - 20);
-        const codeHeight = (lines.length * 12) + 15;
-
-        pdf.setFillColor(...COLORS.codeBg);
-        pdf.rect(cx, cy - 10, contentWidth, codeHeight, 'F');
-
-        pdf.setTextColor(...COLORS.codeText);
         pdf.setFont('courier', 'normal');
         pdf.setFontSize(9);
+        const lines = pdf.splitTextToSize(block.content, contentWidth - 20);
+        const lineHeight = 12;
 
-        let codeY = cy;
-        lines.forEach(line => {
-          pdf.text(line, cx + 10, codeY);
-          codeY += 12;
-        });
+        // Gap before code
+        y += 10;
 
-        cy += codeHeight;
+        for (const line of lines) {
+          if (y + lineHeight > pageHeight - margin) {
+            flushPage();
+            pdf.addPage();
+            y = margin + padding;
+            bubbleStartY = margin;
+
+            // Gap on new page for code continued
+            y += 10;
+          }
+          pageItems.push({ type: 'code_line', content: line, y: y, h: lineHeight });
+          y += lineHeight;
+        }
+        y += 10; // Gap after code
       }
 
-      // --- RENDER IMAGE ---
+      // -- IMAGE --
       else if (block.type === 'image') {
-        try {
-          if (cy + 160 > pageHeight - margin) { pdf.addPage(); cy = margin; }
-          pdf.addImage(block.src, 'JPEG', cx, cy, 200, 150);
-          cy += 160;
-        } catch (e) { }
+        const imgH = 200;
+        if (y + imgH > pageHeight - margin) {
+          flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
+        }
+        if (block.base64) {
+          pageItems.push({ type: 'image', base64: block.base64, y: y });
+        } else {
+          pageItems.push({ type: 'text', content: '[Image Error]', y: y, size: 8 });
+        }
+        y += imgH;
       }
 
-      // --- RENDER BREAK ---
       else if (block.type === 'break') {
-        cy += 10;
+        y += 10;
       }
     }
 
-    y += estimatedHeight + 15;
+    // End of Message -> Flush remaining
+    y += padding; // Bottom padding
+    flushPage();
+    y += 15; // Space between messages
   }
 
-  pdf.save('Premium_Chat_Export.pdf');
+  pdf.save('Final_Fixed_Chat.pdf');
 }
 
-// Markdown Downloader (Updated for Blocks)
-function downloadMarkdown(data) {
-  let md = `# ${data.title}\n\n`;
-  md += `> **Date:** ${data.date}\n> **Messages:** ${data.stats.total}\n\n---\n\n`;
-
-  data.messages.forEach(msg => {
-    const role = msg.role === 'user' ? '👤 **You**' : '🤖 **Assistant**';
-    md += `### ${role}\n\n`;
-
-    if (msg.blocks) {
-      msg.blocks.forEach(block => {
-        if (block.type === 'text') md += `${block.content}\n\n`;
-        else if (block.type === 'header') md += `## ${block.content}\n\n`;
-        else if (block.type === 'code') md += `\`\`\`${block.lang}\n${block.content}\n\`\`\`\n\n`;
-        else if (block.type === 'bullet') md += `* ${block.content}\n`;
-        else if (block.type === 'image') md += `![Image](${block.src})\n\n`;
-      });
-    }
-    md += `---\n\n`;
-  });
-
-  const blob = new Blob([md], { type: 'text/markdown' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${data.title.substring(0, 30)}.md`;
-  a.click();
-}
-
-// HTML Downloader (Updated for Blocks)
-function downloadHTML(data) {
-  let html = `<html><head><title>${data.title}</title>
-  <style>body{font-family:sans-serif;max-width:800px;margin:2em auto;padding:1em;line-height:1.6}
-  .msg{border:1px solid #ddd;padding:1em;margin-bottom:1em;border-radius:8px}
-  .user{background:#f0f7ff} .assistant{background:#fff}
-  .role{font-weight:bold;margin-bottom:0.5em} 
-  pre{background:#282c34;color:#eee;padding:1em;overflow-x:auto;border-radius:4px}
-  img{max-width:100%;border-radius:4px;margin:1em 0}
-  </style>
-  </head><body><h1>${data.title}</h1><p>${data.date} • ${data.stats.total} messages</p><hr>`;
-
-  data.messages.forEach(msg => {
-    let content = '';
-    if (msg.blocks) {
-      msg.blocks.forEach(block => {
-        if (block.type === 'text') content += `<p>${block.content}</p>`;
-        else if (block.type === 'header') content += `<h3>${block.content}</h3>`;
-        else if (block.type === 'code') content += `<pre><code class="language-${block.lang}">${block.content}</code></pre>`;
-        else if (block.type === 'bullet') content += `<li>${block.content}</li>`;
-        else if (block.type === 'image') content += `<img src="${block.src}">`;
-      });
-    }
-    html += `<div class="msg ${msg.role}"><div class="role">${msg.role}</div>${content}</div>`;
-  });
-
-  html += `</body></html>`;
-  const blob = new Blob([html], { type: 'text/html' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${data.title.substring(0, 30)}.html`;
-  a.click();
-}
-
-// --- 4. UI INJECTION ---
+// --- 5. UI INJECTION ---
 
 function createFloatingMenu() {
   const existing = document.getElementById('chat-exporter-menu');
@@ -408,14 +396,14 @@ function createFloatingMenu() {
 
   const createItem = (icon, label, action) => {
     const btn = document.createElement('button');
-    btn.innerHTML = `<span style="margin-right:8px;">${icon}</span>${label}`;
+    btn.innerHTML = `<span style="margin-right:8px;">${icon}  </span>${label}`;
     Object.assign(btn.style, {
       padding: '10px 14px', borderRadius: '8px', border: 'none',
       background: '#333', color: '#fff', cursor: 'pointer', textAlign: 'left',
       width: '100%', display: 'flex', alignItems: 'center', marginBottom: '4px'
     });
     btn.onclick = async () => {
-      mainBtn.innerText = '⏳ Processing...';
+      mainBtn.innerText = '⏳';
       try {
         const data = await extractConversation();
         if (data.messages.length) await action(data);
@@ -428,8 +416,6 @@ function createFloatingMenu() {
   };
 
   menu.appendChild(createItem('📄', 'PDF', generatePDF));
-  menu.appendChild(createItem('📝', 'Markdown', downloadMarkdown));
-  menu.appendChild(createItem('🌐', 'HTML', downloadHTML));
 
   container.appendChild(menu);
   container.appendChild(mainBtn);
@@ -441,25 +427,3 @@ new MutationObserver(() => {
 }).observe(document.body, { childList: true, subtree: true });
 
 createFloatingMenu();
-
-// --- 5. HOST LISTENER ---
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'exportConversation') {
-    (async () => {
-      try {
-        const data = await extractConversation();
-        if (data.messages.length) {
-          await generatePDF(data);
-          sendResponse({ success: true });
-        } else {
-          alert('No messages found');
-          sendResponse({ success: false });
-        }
-      } catch (e) {
-        console.error(e);
-        sendResponse({ success: false, error: e.message });
-      }
-    })();
-    return true;
-  }
-});
