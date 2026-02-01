@@ -1,28 +1,41 @@
 // ============================================
-// CONTENT SCRIPT: v17.3 GOLDEN ENGINE (Final Refinements)
+// CONTENT SCRIPT: v17.4 GOLDEN ENGINE (Async Image Fix)
 // ============================================
 
-console.log('ChatArchive: Golden Engine v17.3 (Final Parser Fixes)');
+console.log('ChatArchive: Golden Engine v17.4 (Images Restored)');
 
-// --- 1. IMAGE CAPTURE (Safe Mode + CORS Fix) ---
-function captureImageElement(img) {
-  if (!img || !img.complete || img.naturalWidth < 20) return null;
+// --- 1. IMAGE CAPTURE (Async Safe Mode + CORS Fix) ---
+async function captureImageElement(img) {
+  if (!img || img.naturalWidth < 20) return null;
   if (img.src.includes('svg')) return null;
 
   try {
-    if (!img.crossOrigin) img.crossOrigin = "anonymous";
+    const clone = new Image();
+    clone.crossOrigin = "anonymous";
+    clone.src = img.src;
+
+    await new Promise((res, rej) => {
+      if (clone.complete) {
+        res();
+      } else {
+        clone.onload = res;
+        clone.onerror = rej;
+      }
+    });
 
     const canvas = document.createElement('canvas');
-    const scale = Math.min(1, 1500 / img.naturalWidth);
-    canvas.width = img.naturalWidth * scale;
-    canvas.height = img.naturalHeight * scale;
+    const scale = Math.min(1, 1500 / clone.naturalWidth);
+    canvas.width = clone.naturalWidth * scale;
+    canvas.height = clone.naturalHeight * scale;
 
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = "#FFFFFF";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(clone, 0, 0, canvas.width, canvas.height);
+
     return canvas.toDataURL('image/jpeg', 0.90);
   } catch (e) {
+    console.warn('ChatArchive: Image capture failed', e);
     return null;
   }
 }
@@ -42,17 +55,17 @@ function cleanText(text) {
     .trim();
 }
 
-// --- 3. DOM PARSER (v17.3 FINAL FIX) ---
-function parseDomToBlocks(root) {
+// --- 3. DOM PARSER (v17.4 ASYNC UPGRADE) ---
+async function parseDomToBlocks(root) {
   const blocks = [];
   const seenImgs = new Set();
   const SQL_WORDS = /^(SELECT|FROM|WHERE|BETWEEN|IN|LOWER|UPPER|AND|OR)$/i;
 
-  function traverse(node, indent = 0) {
+  async function traverse(node, indent = 0) {
     if (node.nodeType === Node.TEXT_NODE) {
       // FIX 2: PRESERVE INLINE CODE (Strong Markers)
       let raw = node.textContent || '';
-      raw = raw.replace(/`([^`]+)`/g, (_, c) => `§§${c}§§`); // Stronger markers for PDF safety
+      raw = raw.replace(/`([^`]+)`/g, (_, c) => `§§${c}§§`);
 
       const text = cleanText(raw);
 
@@ -105,14 +118,17 @@ function parseDomToBlocks(root) {
       return;
     }
 
-    // IMAGE
+    // IMAGE (ASYNC CAPTURE)
     if (tag === 'img') {
       const w = node.getAttribute('width') || node.naturalWidth;
       if (w > 20 && !node.src.includes('svg')) {
         if (!seenImgs.has(node.src)) {
           seenImgs.add(node.src);
-          const base64 = captureImageElement(node);
-          if (base64) blocks.push({ type: 'image', base64: base64, w: w, h: node.clientHeight || 100 });
+          // AWAIT capture here
+          const base64 = await captureImageElement(node);
+          if (base64) {
+            blocks.push({ type: 'image', base64: base64, w: w, h: node.clientHeight || 100 });
+          }
         }
       }
       return;
@@ -135,7 +151,6 @@ function parseDomToBlocks(root) {
         if (cells.length > 0) rows.push(cells);
       });
 
-      // Skip fake layout tables (< 2 rows)
       if (rows.length < 2) return;
 
       let tStr = '';
@@ -148,7 +163,10 @@ function parseDomToBlocks(root) {
       return;
     }
 
-    for (const child of node.childNodes) traverse(child, indent);
+    // Recursive traversal (ASYNC)
+    for (const child of node.childNodes) {
+      await traverse(child, indent);
+    }
 
     // FIX 5: REMOVE EXTRA BLANK BREAKS (Strict P logic)
     if (['p'].includes(tag)) {
@@ -159,11 +177,11 @@ function parseDomToBlocks(root) {
     }
   }
 
-  traverse(root);
+  await traverse(root);
   return blocks;
 }
 
-// --- 4. EXTRACTOR: CHATGPT (v12.0 GOLDEN LOGIC) ---
+// --- 4. EXTRACTOR: CHATGPT (v17.4 ASYNC) ---
 async function extractChatGPTContent() {
   const articles = document.querySelectorAll('article');
   const messages = [];
@@ -175,9 +193,10 @@ async function extractChatGPTContent() {
     let contentNode = article.querySelector('.markdown');
     if (!contentNode) contentNode = article.querySelector('[data-message-author-role] > div') || article;
 
-    const blocks = parseDomToBlocks(contentNode);
+    // Await the new async parser
+    const blocks = await parseDomToBlocks(contentNode);
 
-    // USER IMAGE FIX (Aggressive Sweep)
+    // USER IMAGE FIX (Aggressive Sweep with ASYNC)
     if (role === 'user') {
       const userImages = article.querySelectorAll('img');
       const uniqueUploads = new Set();
@@ -186,7 +205,7 @@ async function extractChatGPTContent() {
           if (uniqueUploads.has(img.src)) continue;
           uniqueUploads.add(img.src);
 
-          const base64 = captureImageElement(img);
+          const base64 = await captureImageElement(img);
           if (base64) {
             blocks.unshift({ type: 'image', base64: base64, w: img.naturalWidth, h: img.naturalHeight });
           }
@@ -200,7 +219,7 @@ async function extractChatGPTContent() {
   return { title: document.title, messages };
 }
 
-// --- 5. EXTRACTOR: GEMINI (ADAPTED TO BLOCKS) ---
+// --- 5. EXTRACTOR: GEMINI (v17.4 ASYNC) ---
 async function extractGeminiContent() {
   const messages = [];
   const mainElement = document.querySelector('main') || document.querySelector('.infinite-scroller');
@@ -216,8 +235,7 @@ async function extractGeminiContent() {
       role = 'user';
     }
 
-    // Reuse the GOLDEN PARSER to ensure Gemini gets Blocks too!
-    const blocks = parseDomToBlocks(container);
+    const blocks = await parseDomToBlocks(container);
     if (blocks.length > 0) messages.push({ role, blocks });
   }
 
