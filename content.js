@@ -1,338 +1,331 @@
 // ============================================
-// CONTENT SCRIPT: BROAD EXTRACTOR + DEEP IMAGES
+// CONTENT SCRIPT: CHATGPT PRIORITY FIX
 // ============================================
 
-console.log('Chat Exporter: Script Loaded');
+console.log('ChatArchive: ChatGPT Focus Engine v5.0');
 
-// --- 1. UTILITIES & IMAGE FETCHING ---
+// --- 1. IMAGE CAPTURE (Canvas Method) ---
 
-function captureImageFromDOM(src) {
-  const allImages = document.getElementsByTagName('img');
-  let img = null;
-  for (let i = 0; i < allImages.length; i++) {
-    if (allImages[i].src === src) {
-      img = allImages[i];
-      break;
-    }
-  }
-  if (!img) return null;
-
+function captureImageElement(img) {
+  if (!img || !img.complete || img.naturalWidth === 0) return null;
   try {
     const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth || img.width;
-    canvas.height = img.naturalHeight || img.height;
-    if (canvas.width === 0 || canvas.height === 0) return null;
+    // Scale down huge images to prevent PDF bloat/crashing
+    const scale = Math.min(1, 1500 / img.naturalWidth);
+    canvas.width = img.naturalWidth * scale;
+    canvas.height = img.naturalHeight * scale;
 
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
-    return canvas.toDataURL('image/jpeg', 0.8);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.85);
   } catch (e) {
+    console.warn("Image capture failed:", e);
     return null;
   }
 }
 
-async function getBase64FromUrl(url) {
-  const canvasData = captureImageFromDOM(url);
-  if (canvasData) return canvasData;
-
-  try {
-    if (url.startsWith('blob:')) {
-      const response = await fetch(url);
-      const blob = await response.blob();
-      return await blobToBase64(blob);
-    }
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 10000);
-    const response = await fetch(url, { signal: controller.signal, cache: 'force-cache' }); // No credentials
-    clearTimeout(id);
-    if (!response.ok) throw new Error('Fetch failed');
-    const blob = await response.blob();
-    return await blobToBase64(blob);
-  } catch (e) {
-    return null;
-  }
-}
-
-function blobToBase64(blob) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.onerror = () => resolve(null);
-    reader.readAsDataURL(blob);
-  });
-}
+// --- 2. TEXT CLEANING (Fixes "Ø=ÜI" Symbols) ---
 
 function cleanText(text) {
   if (!text) return '';
-  return text.replace(/\[\s*\d+(?::\d+)?\s*\]/g, '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  return text
+    // 1. Remove Emojis (jsPDF standard fonts cannot render them, causes garbage)
+    .replace(/[\u{1F600}-\u{1F6FF}]/gu, '')
+    .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')
+    .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')
+    .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '')
+    // 2. Fix "Smart Quotes" and other special chars that turn into symbols
+    .replace(/[\u2018\u2019]/g, "'") // Smart single quotes
+    .replace(/[\u201C\u201D]/g, '"') // Smart double quotes
+    .replace(/[\u2013\u2014]/g, '-') // Em-dashes
+    .replace(/…/g, '...')
+    // 3. Remove non-printable control characters
+    .replace(/[\x00-\x09\x0B-\x1F\x7F]/g, '')
+    .trim();
 }
 
-// --- 2. DOM PARSER (DEEP SCAN) ---
+// --- 3. DOM PARSER (Generic) ---
 
 function parseDomToBlocks(root) {
   const blocks = [];
+  const seenImgs = new Set();
 
-  // 1. Extract Images FIRST (Deep Scan)
-  // We scan the entire root node for images before processing text
-  const images = root.querySelectorAll('img');
-  for (const img of images) {
-    if (img.width > 40 && !img.src.includes('data:image/svg')) {
-      blocks.push({ type: 'image', src: img.src });
-    }
-  }
-
-  // 2. Process Text/Code Structure
-  function traverse(node) {
+  function traverse(node, indent = 0) {
     if (node.nodeType === Node.TEXT_NODE) {
       const text = cleanText(node.textContent);
-      if (text) blocks.push({ type: 'text', content: text });
+      if (text.length > 0) blocks.push({ type: 'text', content: text, indent: indent });
       return;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    if (['SCRIPT', 'STYLE', 'SVG', 'BUTTON', 'NAV'].includes(node.tagName)) return;
+
     const tag = node.tagName.toLowerCase();
 
-    // Skip images in traversal (captured above) to avoid duplicates? 
-    // Actually, we should keep them if they are inline, but for safety lets de-dupe later.
-
+    // Code
     if (tag === 'pre') {
       const codeEl = node.querySelector('code') || node;
-      const lang = (codeEl.className || '').replace('language-', '').toUpperCase() || 'CODE';
-      blocks.push({ type: 'code', lang: lang, content: codeEl.innerText });
-      // Don't traverse children of pre
+      blocks.push({ type: 'code', content: codeEl.innerText }); // Don't clean code formatting
       return;
     }
 
-    if (tag === 'table') {
-      let tableText = '';
-      node.querySelectorAll('tr').forEach((tr, i) => {
-        const cells = Array.from(tr.querySelectorAll('th, td')).map(td => cleanText(td.innerText));
-        tableText += '| ' + cells.join(' | ') + ' |\n';
-        if (i === 0) tableText += '| ' + cells.map(() => '---').join(' | ') + ' |\n';
-      });
-      blocks.push({ type: 'code', lang: 'TABLE', content: tableText });
+    // Lists
+    if (tag === 'li') {
+      const text = cleanText(node.innerText);
+      const prefix = (node.innerText.trim().match(/^[•\-\d]/)) ? '' : '• ';
+      if (text) blocks.push({ type: 'text', content: prefix + text, indent: 15 });
       return;
     }
 
+    // Images (Standard)
+    if (tag === 'img') {
+      const width = node.getAttribute('width') || node.clientWidth || node.naturalWidth;
+      if (width > 50 && !node.src.includes('svg')) {
+        if (!seenImgs.has(node.src)) {
+          seenImgs.add(node.src);
+          const base64 = captureImageElement(node);
+          if (base64) {
+            blocks.push({ type: 'image', base64: base64, w: width, h: node.clientHeight || 100 });
+          }
+        }
+      }
+      return;
+    }
+
+    // Headers
     if (/^h[1-6]$/.test(tag)) {
-      blocks.push({ type: 'header', content: cleanText(node.innerText) });
+      blocks.push({ type: 'header', content: cleanText(node.innerText).toUpperCase() });
       return;
     }
 
-    // Check for "User Query" text containers specifically
-    if (node.classList.contains('user-query') || node.getAttribute('data-test-id') === 'user-query') {
-      // Isolate this block
-    }
+    for (const child of node.childNodes) traverse(child, indent);
 
-    for (const child of node.childNodes) traverse(child);
-    if (tag === 'p' || tag === 'div' || tag === 'br') blocks.push({ type: 'break' });
+    if (['p', 'div', 'br'].includes(tag)) {
+      if (blocks.length > 0 && blocks[blocks.length - 1].type !== 'break') {
+        blocks.push({ type: 'break' });
+      }
+    }
   }
 
-  // Only traverse if we haven't just grabbed images. 
-  // Actually, standard traversal is fine, we just need to dedupe images.
   traverse(root);
-
-  // Dedupe logic: If an image src is in blocks twice, keep one.
-  // Prioritize keeping the ones found in Deep Scan (first) or Traversal?
-  // Let's filter blocks: Keep unique Image SRCs.
-  const seenImgs = new Set();
-  const uniqueBlocks = [];
-  for (const b of blocks) {
-    if (b.type === 'image') {
-      if (seenImgs.has(b.src)) continue;
-      seenImgs.add(b.src);
-    }
-    uniqueBlocks.push(b);
-  }
-
-  return uniqueBlocks;
+  return blocks;
 }
 
-// --- 3. EXTRACTORS (BROAD SPECTRUM) ---
+// --- 4. CHATGPT EXTRACTOR (SPECIFIC FIX) ---
 
-async function extractGeminiContent() {
-  // Strategy: Try Broad Selectors for "Message Containers"
-  // 1. Standard "Turn" container
-  let messageNodes = document.querySelectorAll('message-content, .message-content, [class*="conversation-turn"]');
-
-  // 2. Fallback: Search for User Query / Model Response containers directly
-  if (messageNodes.length === 0) {
-    messageNodes = document.querySelectorAll('[data-test-id="user-query"], [data-test-id="model-response"], .user-query, .model-response');
-  }
-
-  // 3. Fallback: Search for generic scroll items
-  if (messageNodes.length === 0) {
-    // Last resort: Look for main children
-    const main = document.querySelector('main');
-    if (main) messageNodes = main.children;
-  }
-
-  const messages = [];
-
-  for (const node of messageNodes) {
-    // Heuristic for Role
-    let role = 'assistant';
-    const text = node.innerText || '';
-
-    // Check for User Signals
-    if (
-      node.closest('.user-message') ||
-      node.classList.contains('user-query') ||
-      node.getAttribute('data-test-id') === 'user-query' ||
-      node.hasAttribute('data-is-user')
-    ) {
-      role = 'user';
-    }
-    // Fallback: Check if it LOOKS like a user message (short, no markdown usually)
-    // (Skipping hazardous guess)
-
-    const blocks = parseDomToBlocks(node);
-
-    // Async Image Load
-    for (const block of blocks) {
-      if (block.type === 'image') block.base64 = await getBase64FromUrl(block.src);
-    }
-
-    if (blocks.length > 0) messages.push({ role, blocks });
-  }
-
-  return { title: document.title.replace('Gemini', '').trim(), messages };
-}
-
-// keep ChatGPT extract same (it was working mostly, just images were failing)
 async function extractChatGPTContent() {
   const articles = document.querySelectorAll('article');
   const messages = [];
+
   for (const article of articles) {
+    // 1. Identify Role
     const isUser = article.querySelector('[data-message-author-role="user"]');
     const role = isUser ? 'user' : 'assistant';
-    const contentNode = article.querySelector('.markdown') || article.querySelector('[data-message-author-role] + div');
 
-    if (contentNode) {
-      const blocks = parseDomToBlocks(contentNode);
-      // Extra Image Sweep
-      const extraImagesNodes = article.querySelectorAll('img');
-      const extraBlocks = [];
-      for (const img of extraImagesNodes) {
-        if (img.width > 50 && !blocks.some(b => b.src === img.src)) {
-          const base64 = await getBase64FromUrl(img.src);
-          extraBlocks.push({ type: 'image', src: img.src, base64: base64 });
+    // 2. Find Text Content
+    // AI usually has '.markdown', User usually has 'div' or specific whitespace
+    let contentNode = article.querySelector('.markdown');
+    if (!contentNode) {
+      // Fallback for user messages
+      const specificUserMsg = article.querySelector('[data-message-author-role] > div');
+      contentNode = specificUserMsg || article;
+    }
+
+    const blocks = parseDomToBlocks(contentNode);
+
+    // 3. IMAGE FIX: Scan for User Uploads (Blobs/Attachments)
+    // ChatGPT puts user images often outside the .markdown block or in specific wrappers
+    if (role === 'user') {
+      const userImages = article.querySelectorAll('img');
+      for (const img of userImages) {
+        // We only want 'blob:' images (uploads) or standard images that weren't caught
+        if (img.width > 50 && !img.src.includes('svg')) {
+          // Check if we already grabbed this image in parseDomToBlocks
+          const alreadyExists = blocks.some(b => b.type === 'image' && (b.base64?.length > 100)); // weak check but okay
+
+          if (!alreadyExists) {
+            const base64 = captureImageElement(img);
+            if (base64) {
+              // Add to START of message (User images usually come before text)
+              blocks.unshift({ type: 'image', base64: base64, w: img.naturalWidth, h: img.naturalHeight });
+            }
+          }
         }
       }
+    }
 
-      // Merge
-      if (role === 'user') {
-        for (let i = extraBlocks.length - 1; i >= 0; i--) blocks.unshift(extraBlocks[i]);
-      } else {
-        extraBlocks.forEach(b => blocks.push(b));
-      }
-
-      for (const block of blocks) {
-        if (block.type === 'image' && !block.base64) block.base64 = await getBase64FromUrl(block.src);
-      }
+    if (blocks.length > 0) {
       messages.push({ role, blocks });
     }
   }
+
   return { title: document.title, messages };
 }
 
-async function extractConversation() {
-  let data;
-  if (window.location.hostname.includes('gemini')) {
-    data = await extractGeminiContent();
-  } else if (window.location.hostname.includes('claude')) {
-    const elements = document.querySelectorAll('.font-user-message, .font-claude-message');
-    const msgs = [];
-    for (const el of elements) {
-      const role = el.classList.contains('font-user-message') ? 'user' : 'assistant';
-      const blocks = parseDomToBlocks(el);
-      if (blocks.length) msgs.push({ role, blocks });
-    }
-    data = { title: document.title, messages: msgs };
-  } else {
-    data = await extractChatGPTContent();
-  }
-  data.date = new Date().toLocaleString();
-  return data;
-}
 
-// --- 4. RENDERER ---
+// --- 5. PDF GENERATOR (Preserved Layout) ---
+
 async function generatePDF(data) {
   const { jsPDF } = window.jspdf || window;
   if (!jsPDF) { alert("jsPDF library not loaded."); return; }
-  const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
-  const pageWidth = 595.28; const pageHeight = 841.89; const margin = 36;
-  let y = margin;
-  const COLORS = { userBg: [243, 244, 246], aiBg: [255, 255, 255], border: [229, 231, 235], text: [31, 41, 55], codeBg: [40, 44, 52], codeText: [220, 220, 220] };
 
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(16);
-  pdf.text((data.title || 'Export').substring(0, 50), margin, y); y += 54;
+  const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
+  const pageWidth = 595.28;
+  const pageHeight = 841.89;
+  const margin = 40;
+
+  let y = margin;
+  const COLORS = {
+    userBg: [243, 244, 246],
+    aiBg: [255, 255, 255],
+    border: [229, 231, 235],
+    text: [31, 41, 55],
+    codeBg: [40, 44, 52],
+    codeText: [220, 220, 220]
+  };
+
+  // Header
+  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(18);
+  pdf.text((data.title || 'Export').substring(0, 45), margin, y); y += 30;
+  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(10);
+  pdf.setTextColor(100); pdf.text(new Date().toLocaleString(), margin, y); y += 30;
 
   for (const msg of data.messages) {
     if (!msg.blocks || msg.blocks.length === 0) continue;
+
     const isUser = msg.role === 'user';
-    const bubbleWidth = 460;
+    const bubbleWidth = 440;
     const x = isUser ? (pageWidth - margin - bubbleWidth) : margin;
-    const padding = 20; const contentWidth = bubbleWidth - (padding * 2.5);
-    let bubbleStartY = y; let pageItems = [];
+    const padding = 15;
+    const contentWidth = bubbleWidth - (padding * 2);
+
+    let bubbleStartY = y;
+    let pageItems = [];
 
     const flushPage = () => {
       if (pageItems.length === 0) return;
       const bubbleH = y - bubbleStartY + (padding / 2);
-      pdf.setFillColor(...(isUser ? COLORS.userBg : COLORS.aiBg)); pdf.setDrawColor(...COLORS.border);
-      pdf.roundedRect(x, bubbleStartY, bubbleWidth, bubbleH, 8, 8, 'FD');
-      let codeGroupStart = null; let codeGroupH = 0;
-      const flushCodeGroup = () => { if (codeGroupStart !== null) { pdf.setFillColor(...COLORS.codeBg); pdf.rect(x + padding, codeGroupStart - 6, contentWidth, codeGroupH + 12, 'F'); codeGroupStart = null; codeGroupH = 0; } };
 
-      pageItems.forEach(item => { if (item.type === 'code_line') { if (codeGroupStart === null) codeGroupStart = item.y; codeGroupH += item.h; } else flushCodeGroup(); });
-      flushCodeGroup();
+      pdf.setFillColor(...(isUser ? COLORS.userBg : COLORS.aiBg));
+      pdf.setDrawColor(...COLORS.border);
+      pdf.roundedRect(x, bubbleStartY, bubbleWidth, bubbleH, 6, 6, 'FD');
+
+      // Draw Code BG
       pageItems.forEach(item => {
-        if (['text', 'bullet', 'header'].includes(item.type)) {
-          pdf.setTextColor(...COLORS.text); pdf.setFont('helvetica', item.style || 'normal'); pdf.setFontSize(item.size || 10);
+        if (item.type === 'bg') {
+          pdf.setFillColor(...COLORS.codeBg);
+          pdf.rect(x + padding, item.y, contentWidth, item.h, 'F');
+        }
+      });
+
+      // Draw Content
+      pageItems.forEach(item => {
+        if (item.type === 'text' || item.type === 'header') {
+          pdf.setTextColor(...COLORS.text);
+          pdf.setFont('helvetica', item.style || 'normal');
+          pdf.setFontSize(item.size || 10);
           pdf.text(item.content, x + padding + (item.indent || 0), item.y);
-        } else if (item.type === 'code_line') {
-          pdf.setTextColor(...COLORS.codeText); pdf.setFont('courier', 'normal'); pdf.setFontSize(9);
-          pdf.text(item.content, x + padding + 10, item.y);
-        } else if (item.type === 'image') {
-          if (item.base64) pdf.addImage(item.base64, 'JPEG', x + padding, item.y, 250, 180);
-          else { pdf.setTextColor(255, 0, 0); pdf.setFontSize(8); pdf.text('[Image Error]', x + padding, item.y + 20); }
+        } else if (item.type === 'image' && item.base64) {
+          try {
+            // Ensure image fits
+            const imgW = Math.min(contentWidth, 300);
+            const imgH = (item.h * imgW) / item.w;
+            pdf.addImage(item.base64, 'JPEG', x + padding, item.y, imgW, imgH);
+          } catch (e) { }
         }
       });
       pageItems = [];
     };
 
     y += padding;
+
     for (const block of msg.blocks) {
-      if (block.type === 'text') {
-        pdf.setFont('helvetica', 'normal'); pdf.setFontSize(10);
-        const lines = pdf.splitTextToSize(block.content, contentWidth);
-        for (const line of lines) { if (y + 14 > pageHeight - margin) { flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin; } pageItems.push({ type: 'text', content: line, y: y, size: 10 }); y += 14; }
+      // Page Break Check
+      if (y > pageHeight - margin - 50) {
+        flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
+      }
+
+      if (block.type === 'text' || block.type === 'header') {
+        const size = block.type === 'header' ? 12 : 10;
+        const style = block.type === 'header' ? 'bold' : 'normal';
+        pdf.setFont('helvetica', style); pdf.setFontSize(size);
+        const lines = pdf.splitTextToSize(block.content, contentWidth - (block.indent || 0));
+        for (const line of lines) {
+          if (y > pageHeight - margin - 20) {
+            flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
+          }
+          pageItems.push({ type: 'text', content: line, y: y, indent: block.indent, size, style });
+          y += 14;
+        }
       } else if (block.type === 'image') {
-        if (y + 200 > pageHeight - margin) { flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin; }
-        pageItems.push({ type: 'image', base64: block.base64, y: y }); y += 200;
-      } else if (block.type === 'code') { /* simplified code block flow */
+        const dispW = Math.min(contentWidth, 300);
+        const dispH = (block.h * dispW) / block.w;
+
+        if (y + dispH > pageHeight - margin) {
+          flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
+        }
+        pageItems.push({ type: 'image', base64: block.base64, y: y, w: block.w, h: block.h });
+        y += dispH + 10;
+      } else if (block.type === 'code') {
         pdf.setFont('courier', 'normal'); pdf.setFontSize(9);
-        const lines = pdf.splitTextToSize(block.content, contentWidth - 20); y += 10;
-        for (const line of lines) { if (y + 12 > pageHeight - margin) { flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin; y += 10; } pageItems.push({ type: 'code_line', content: line, y: y, h: 12 }); y += 12; } y += 10;
-      } else if (block.type === 'break') y += 10;
+        const lines = pdf.splitTextToSize(block.content, contentWidth - 10);
+        const blockH = (lines.length * 12) + 10;
+        if (y + blockH > pageHeight - margin) {
+          flushPage(); pdf.addPage(); y = margin + padding; bubbleStartY = margin;
+        }
+        pageItems.push({ type: 'bg', y: y - 5, h: blockH });
+        for (const line of lines) {
+          pageItems.push({ type: 'text', content: line, y: y, style: 'normal', size: 9 });
+          y += 12;
+        }
+        y += 10;
+      } else if (block.type === 'break') y += 8;
     }
-    y += padding; flushPage(); y += 15;
+
+    y += padding;
+    flushPage();
+    y += 20;
   }
-  pdf.save('Smart_Fixed_Chat.pdf');
+
+  pdf.save('ChatExport.pdf');
 }
 
-// "Brute Force" Interval Injection
+
+// --- 6. ROUTER & UI ---
+
+async function extractConversation() {
+  // Currently focusing on ChatGPT as requested
+  if (window.location.hostname.includes('chatgpt')) return await extractChatGPTContent();
+  // Keep fallback for others or add later
+  return await extractChatGPTContent();
+}
+
 function createFloatingMenu() {
-  if (!document.body) return;
-  const existing = document.getElementById('chat-exporter-menu');
-  if (existing) return;
-  const container = document.createElement('div');
-  container.id = 'chat-exporter-menu';
-  Object.assign(container.style, { position: 'fixed', bottom: '24px', right: '24px', zIndex: '9999999', display: 'flex', flexDirection: 'column', alignItems: 'flex-end' });
-  const mainBtn = document.createElement('button');
-  mainBtn.innerHTML = '📄 Export';
-  Object.assign(mainBtn.style, { padding: '12px 20px', borderRadius: '12px', border: 'none', background: '#000', color: '#fff', cursor: 'pointer', fontWeight: 'bold' });
-  mainBtn.onclick = async () => { mainBtn.innerText = 'Processing...'; try { await generatePDF(await extractConversation()); } catch (e) { console.error(e); alert('Error'); } mainBtn.innerHTML = '📄 Export'; };
-  container.appendChild(mainBtn); document.body.appendChild(container); console.log('Button Injected');
+  if (document.getElementById('chat-exporter-btn')) return;
+  const btn = document.createElement('button');
+  btn.id = 'chat-exporter-btn';
+  btn.innerText = '📄 Export Chat';
+  Object.assign(btn.style, {
+    position: 'fixed', bottom: '20px', right: '20px', zIndex: 10000,
+    padding: '12px 24px', background: '#10a37f', color: '#fff',
+    border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
+  });
+  btn.onclick = async () => {
+    const oldText = btn.innerText;
+    btn.innerText = 'Processing...';
+    try {
+      const data = await extractConversation();
+      await generatePDF(data);
+      btn.innerText = '✅ Exported';
+    } catch (e) {
+      console.error(e);
+      btn.innerText = '❌ Failed';
+      alert('Export failed.');
+    }
+    setTimeout(() => btn.innerText = '📄 Export Chat', 3000);
+  };
+  document.body.appendChild(btn);
 }
 setInterval(createFloatingMenu, 2000);
 createFloatingMenu();
