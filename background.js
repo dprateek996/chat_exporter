@@ -1,4 +1,4 @@
-// Create context menu on install
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: 'export-conversation',
@@ -25,7 +25,7 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-// Handle context menu clicks
+
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === 'export-conversation') {
     chrome.tabs.sendMessage(tab.id, { action: 'exportConversation' });
@@ -35,32 +35,17 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === 'GENERATE_PDF_BACKGROUND') {
-    (async () => {
-      try {
-        const jsPDFLib = await import(chrome.runtime.getURL('libs/jspdf.umd.min.js'));
-        const { jsPDF } = jsPDFLib;
-
-        sendResponse({ success: true, pdfGenerated: true });
-      } catch (error) {
-        sendResponse({ success: false, error: error.message });
-      }
-    })();
-    return true;
-  }
-
-  // Handle capturing a visible portion of the tab (for image elements)
+ 
   if (request.type === 'CAPTURE_IMAGE_REGION') {
     (async () => {
       try {
         const { rect, tabId } = request;
         console.log('[ChatArchive BG] Capturing region:', rect);
 
-        // Capture the visible tab
+   
         const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
 
-        // We need to crop the image to the specified region
-        // Send the full screenshot and region info back to content script to crop
+        
         sendResponse({ success: true, dataUrl, rect });
       } catch (error) {
         console.log('[ChatArchive BG] Capture error:', error.message);
@@ -70,7 +55,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  // Handle image fetching from background (has different permissions)
+    
   if (request.type === 'FETCH_IMAGE_BASE64') {
     (async () => {
       try {
@@ -83,7 +68,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         let response = null;
         let lastError = null;
 
-        // Try 1: With credentials (needed for Google authenticated images)
         if (!response) {
           try {
             console.log('[ChatArchive BG] Try 1: with credentials');
@@ -100,7 +84,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           }
         }
 
-        // Try 2: Without credentials (for public images)
         if (!response) {
           try {
             console.log('[ChatArchive BG] Try 2: without credentials');
@@ -117,7 +100,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           }
         }
 
-        // Try 3: No-cors mode (gets opaque response but might work)
         if (!response) {
           try {
             console.log('[ChatArchive BG] Try 3: no-cors mode');
@@ -125,7 +107,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               credentials: 'include',
               mode: 'no-cors'
             });
-            // no-cors returns opaque response, can't check ok
             response = resp;
           } catch (e) {
             console.log('[ChatArchive BG] Try 3 failed:', e.message);
@@ -165,6 +146,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ success: false, error: error.message });
       }
     })();
-    return true; // Required for async sendResponse
+    return true; 
   }
 });

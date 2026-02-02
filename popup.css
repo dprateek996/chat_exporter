@@ -1,0 +1,202 @@
+:root {
+    --bg: #0a0a0a;
+    --surface: #141414;
+    --accent: #ffffff;
+    --accent-soft: rgba(255, 255, 255, 0.1);
+    --text-main: #efefef;
+    --text-dim: #888888;
+    --border: rgba(255, 255, 255, 0.06);
+}
+
+body {
+    width: 340px;
+    background: transparent;
+    color: var(--text-main);
+    font-family: 'Inter', -apple-system, sans-serif;
+    margin: 0;
+    padding: 8px;
+    -webkit-font-smoothing: antialiased;
+}
+
+.app-container {
+    background: var(--bg);
+    padding: 20px;
+    border-radius: 20px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.brand h1 {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.logo-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+}
+
+.badge {
+    font-size: 9px;
+    background: var(--accent-soft);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--text-dim);
+}
+
+.settings-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    transition: all 0.15s;
+}
+
+.settings-btn:hover {
+    background: var(--accent-soft);
+    color: var(--text-main);
+}
+
+/* Platform Pills */
+.platform-selector {
+    display: flex;
+    background: var(--surface);
+    padding: 6px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    margin-bottom: 20px;
+}
+
+.p-pill {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 10px 0;
+    cursor: pointer;
+    border-radius: 14px;
+    transition: all 0.3s ease;
+}
+
+.p-pill:hover {
+    color: var(--text-main);
+}
+
+.p-pill.active {
+    background: var(--accent-soft);
+    color: var(--text-main);
+    animation: pillPulse 0.6s ease-out;
+}
+
+@keyframes pillPulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.3);
+    }
+
+    70% {
+        box-shadow: 0 0 0 6px rgba(255, 255, 255, 0);
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+    }
+}
+
+/* Export Card */
+.export-card {
+    background: linear-gradient(145deg, #1a1a1a 0%, #141414 100%);
+    border: 1px solid var(--border);
+    padding: 24px;
+    border-radius: 24px;
+    text-align: center;
+}
+
+.card-info span {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.card-info p {
+    font-size: 13px;
+    margin: 8px 0 20px;
+    color: var(--text-main);
+}
+
+.primary-cta {
+    width: 100%;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    padding: 14px;
+    border-radius: 14px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    transition: transform 0.1s, filter 0.1s;
+}
+
+.primary-cta:hover {
+    transform: translateY(-1px);
+    filter: brightness(0.9);
+}
+
+.primary-cta:active {
+    transform: translateY(0px);
+}
+
+.primary-cta.loading {
+    background: linear-gradient(90deg, #333 25%, #444 50%, #333 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    color: transparent;
+}
+
+@keyframes shimmer {
+    0% {
+        background-position: 200% 0;
+    }
+
+    100% {
+        background-position: -200% 0;
+    }
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.main-action {
+    animation: fadeIn 0.3s ease forwards;
+}

@@ -1,20 +1,29 @@
- {
+{
   "manifest_version": 3,
   "name": "ChatArchive - Export AI Conversations",
   "version": "2.0.0",
   "description": "Export your AI conversations from ChatGPT, Google Gemini, and Claude AI to clean, formatted PDF documents.",
   "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
   "action": {
     "default_popup": "popup.html",
-    "default_icon": "icons/icon128.png",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
     "default_title": "Export AI Conversation"
   },
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["contextMenus", "activeTab"],
+  "permissions": [
+    "contextMenus",
+    "activeTab"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
@@ -36,14 +45,19 @@
         "https://claude.ai/*",
         "https://gemini.google.com/*"
       ],
-      "js": ["libs/jspdf.umd.min.js", "content.js"],
+      "js": [
+        "libs/jspdf.umd.min.js",
+        "content.js"
+      ],
       "run_at": "document_end",
       "all_frames": false
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["libs/jspdf.umd.min.js", "injected.js"],
+      "resources": [
+        "libs/jspdf.umd.min.js"
+      ],
       "matches": [
         "https://chat.openai.com/*",
         "https://chatgpt.com/*",
