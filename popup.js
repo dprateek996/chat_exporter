@@ -1,10 +1,10 @@
-// ChatArchive Popup Script - Premium UI
+
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Platform pills - highlight active based on current tab
+
   const pills = document.querySelectorAll('.p-pill');
 
-  // Check current tab and highlight matching pill
+
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const url = tabs[0]?.url || '';
     pills.forEach(pill => pill.classList.remove('active'));
@@ -18,7 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Platform navigation buttons
+
   document.getElementById('open-chatgpt-btn').onclick = () => {
     chrome.tabs.create({ url: 'https://chatgpt.com' });
   };
@@ -31,19 +31,19 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.tabs.create({ url: 'https://claude.ai' });
   };
 
-  // Main Export Trigger - sends message to content script
+
   document.getElementById('main-export-trigger').onclick = async () => {
     const btn = document.getElementById('main-export-trigger');
     const originalText = btn.textContent;
 
-    // Show loading state with shimmer
+
     btn.classList.add('loading');
     btn.textContent = 'Exporting...';
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-      // Check if we're on a supported page
+
       const url = tab?.url || '';
       if (!url.includes('chatgpt.com') && !url.includes('chat.openai.com') &&
         !url.includes('gemini.google.com') && !url.includes('claude.ai')) {
@@ -53,7 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      // Send export message to content script
+    
       chrome.tabs.sendMessage(tab.id, { action: 'exportConversation' }, (response) => {
         btn.classList.remove('loading');
         if (response?.success) {
