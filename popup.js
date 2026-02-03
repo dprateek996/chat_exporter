@@ -15,6 +15,10 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('open-gemini-btn').classList.add('active');
     } else if (url.includes('claude.ai')) {
       document.getElementById('open-claude-btn').classList.add('active');
+    } else if (url.includes('perplexity.ai')) {
+      document.getElementById('open-perplexity-btn').classList.add('active');
+    } else if (url.includes('grok.com')) {
+      document.getElementById('open-grok-btn').classList.add('active');
     }
   });
 
@@ -29,6 +33,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('open-claude-btn').onclick = () => {
     chrome.tabs.create({ url: 'https://claude.ai' });
+  };
+
+  document.getElementById('open-perplexity-btn').onclick = () => {
+    chrome.tabs.create({ url: 'https://www.perplexity.ai' });
+  };
+
+  document.getElementById('open-grok-btn').onclick = () => {
+    chrome.tabs.create({ url: 'https://grok.com' });
   };
 
 
@@ -46,14 +58,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const url = tab?.url || '';
       if (!url.includes('chatgpt.com') && !url.includes('chat.openai.com') &&
-        !url.includes('gemini.google.com') && !url.includes('claude.ai')) {
+        !url.includes('gemini.google.com') && !url.includes('claude.ai') &&
+        !url.includes('perplexity.ai') && !url.includes('grok.com')) {
         btn.classList.remove('loading');
         btn.textContent = 'Open a chat first';
         setTimeout(() => { btn.textContent = originalText; }, 2000);
         return;
       }
 
-    
+
       chrome.tabs.sendMessage(tab.id, { action: 'exportConversation' }, (response) => {
         btn.classList.remove('loading');
         if (response?.success) {
@@ -70,4 +83,6 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => { btn.textContent = originalText; }, 2000);
     }
   };
+
+
 });

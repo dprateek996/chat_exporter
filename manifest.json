@@ -22,7 +22,8 @@
   },
   "permissions": [
     "contextMenus",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
@@ -35,7 +36,10 @@
     "https://lh3.googleusercontent.com/*",
     "https://files.oaiusercontent.com/*",
     "https://*.openai.com/*",
-    "https://*.anthropic.com/*"
+    "https://*.anthropic.com/*",
+    "https://www.perplexity.ai/*",
+    "https://perplexity.ai/*",
+    "https://grok.com/*"
   ],
   "content_scripts": [
     {
@@ -43,7 +47,9 @@
         "https://chat.openai.com/*",
         "https://chatgpt.com/*",
         "https://claude.ai/*",
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://www.perplexity.ai/*",
+        "https://grok.com/*"
       ],
       "js": [
         "libs/jspdf.umd.min.js",
@@ -62,7 +68,9 @@
         "https://chat.openai.com/*",
         "https://chatgpt.com/*",
         "https://claude.ai/*",
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://www.perplexity.ai/*",
+        "https://grok.com/*"
       ]
     }
   ],
