@@ -60,26 +60,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     (async () => {
       try {
         const url = request.url;
-        const isGoogleImage = url.includes('googleusercontent') || url.includes('ggpht') || url.includes('lh3.google');
-
-
         let response = null;
         let lastError = null;
 
-        if (!response) {
-          try {
-            const resp = await fetch(url, {
-              credentials: 'include',
-              mode: 'cors',
-              headers: { 'Accept': 'image/*' }
-            });
-            if (resp.ok) response = resp;
-            else lastError = `Status ${resp.status}`;
-          } catch (e) {
-            lastError = e.message;
-          }
+        // 1. Try with credentials included (for authenticated resources)
+        try {
+          const resp = await fetch(url, {
+            credentials: 'include',
+            mode: 'cors',
+            headers: { 'Accept': 'image/*' }
+          });
+          if (resp.ok) response = resp;
+          else lastError = `Status ${resp.status}`;
+        } catch (e) {
+          lastError = e.message;
         }
 
+        // 2. If failed, try anonymous (sometimes helps with aggressive CORS configs)
         if (!response) {
           try {
             const resp = await fetch(url, {
@@ -94,30 +91,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           }
         }
 
-        if (!response) {
-          try {
-            const resp = await fetch(url, {
-              credentials: 'include',
-              mode: 'no-cors'
-            });
-            response = resp;
-          } catch (e) {
-            lastError = e.message;
-          }
-        }
-
         if (response) {
           try {
             const blob = await response.blob();
-
             if (blob.size < 100) {
-              sendResponse({ success: false, error: 'Blob too small (likely error response)' });
+              sendResponse({ success: false, error: 'Blob too small' });
               return;
             }
 
             const reader = new FileReader();
             reader.onloadend = () => {
-              sendResponse({ success: true, base64: reader.result });
+              // Ensure we have a result
+              if (reader.result) {
+                sendResponse({ success: true, base64: reader.result });
+              } else {
+                sendResponse({ success: false, error: 'Empty reader result' });
+              }
             };
             reader.onerror = () => {
               sendResponse({ success: false, error: 'FileReader error' });
@@ -133,6 +122,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ success: false, error: error.message });
       }
     })();
-    return true;
+    return true; // Keep channel open
   }
 });

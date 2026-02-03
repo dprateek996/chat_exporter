@@ -15,7 +15,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       console.error('ChatArchive Synchronous Error:', e);
       sendResponse({ success: false, error: e.message });
     }
-    return true; 
+    return true;
   }
 });
 
@@ -49,13 +49,15 @@ async function captureImageElement(img) {
   if (!img || !img.complete || img.naturalWidth < 20) {
     return null;
   }
+  // Skip SVGs or tiny icons
   if (img.src.includes('svg')) return null;
 
   const src = img.src;
 
-
+  // 1. Try Canvas Capture (Fastest, handles same-origin)
   try {
     const canvas = document.createElement('canvas');
+    // Cap resolution to avoid massive PDF bloat
     const scale = Math.min(1, 1500 / img.naturalWidth);
     canvas.width = img.naturalWidth * scale;
     canvas.height = img.naturalHeight * scale;
@@ -63,21 +65,18 @@ async function captureImageElement(img) {
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = "#FFFFFF";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // CORS: This line will throw if image is cross-origin and not CORS-enabled
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-
-    try {
-      ctx.getImageData(0, 0, 1, 1);
-      const base64 = canvas.toDataURL('image/jpeg', 0.90);
-      if (base64.length > 1000) {
-        return base64;
-      }
-    } catch (taintError) {
+    const base64 = canvas.toDataURL('image/jpeg', 0.90);
+    if (base64.length > 1000) {
+      return base64;
     }
   } catch (e) {
+    // Canvas tainted (CORS protection) or other error. Proceed to background fetch.
   }
 
-
+  // 2. Try Background Fetch (Handles some CORS headers via background)
   try {
     const response = await chrome.runtime.sendMessage({
       type: 'FETCH_IMAGE_BASE64',
@@ -88,18 +87,17 @@ async function captureImageElement(img) {
       return response.base64;
     }
   } catch (e) {
+    // Background fetch failed. Proceed to screen capture.
   }
 
-
+  // 3. Try Screen Capture (Slowest but most robust - captures exactly what user sees)
   try {
-
-
+    // Scroll into view
     img.scrollIntoView({ block: 'center', behavior: 'instant' });
-    await new Promise(r => setTimeout(r, 100));
-
+    await new Promise(r => setTimeout(r, 150)); // Wait for scroll/render
 
     const rect = img.getBoundingClientRect();
-
+    if (rect.width === 0 || rect.height === 0) return null;
 
     const response = await chrome.runtime.sendMessage({
       type: 'CAPTURE_IMAGE_REGION',
@@ -112,7 +110,7 @@ async function captureImageElement(img) {
     });
 
     if (response && response.success && response.dataUrl) {
-
+      // Crop the screenshot to the image rect
       const cropCanvas = document.createElement('canvas');
       const dpr = window.devicePixelRatio || 1;
       cropCanvas.width = response.rect.width * dpr;
@@ -141,6 +139,7 @@ async function captureImageElement(img) {
       }
     }
   } catch (e) {
+    // Screen capture failed
   }
 
   return 'CORS_BLOCKED';
@@ -401,9 +400,10 @@ async function extractGeminiContent() {
         const userImages = userQuery.querySelectorAll('img');
         for (const img of userImages) {
           const w = img.naturalWidth || 0;
-          if (w > 30 && !img.src.includes('svg')) {
+          const h = img.naturalHeight || 0;
+          if (w > 30 && h > 30 && !img.src.includes('svg')) {
             const base64 = await captureImageElement(img);
-            if (base64 && base64.length > 100) userBlocks.unshift({ type: 'image', base64, w: w, h: 100 });
+            if (base64 && base64.length > 100) userBlocks.unshift({ type: 'image', base64, w: w, h: h });
           }
         }
         if (userBlocks.length > 0) messages.push({ role: 'user', blocks: userBlocks });
@@ -411,8 +411,42 @@ async function extractGeminiContent() {
 
       const modelResponse = turn.querySelector('model-response');
       if (modelResponse) {
+        // Gemini Logic: Images often appear OUTSIDE the .markdown block
+        const aiBlocks = [];
+
+        // 1. Capture All Images in the Response First
+        const aiImages = Array.from(modelResponse.querySelectorAll('img'));
+        const capturedImageSrcs = new Set();
+
+        for (const img of aiImages) {
+          const w = img.naturalWidth || 0;
+          const h = img.naturalHeight || 0;
+
+          // Filter out icons, avatars, and tiny UI elements
+          if (w > 100 && h > 100 && !img.src.includes('svg') && !img.src.includes('icon') && !img.classList.contains('avatar')) {
+            const base64 = await captureImageElement(img);
+            if (base64 && base64.length > 100) {
+              aiBlocks.push({ type: 'image', base64, w: w, h: h });
+              capturedImageSrcs.add(img.src);
+            }
+          }
+        }
+
+        // 2. Parse Text Content
         const markdown = modelResponse.querySelector('.markdown') || modelResponse;
-        const aiBlocks = await parseDomToBlocks(markdown, 'assistant');
+        const textBlocks = await parseDomToBlocks(markdown, 'assistant');
+
+        // 3. Merge, avoiding duplicate images if parseDomToBlocks also caught them
+        for (const block of textBlocks) {
+          if (block.type === 'image' || block.type === 'image_pending') {
+            // If we already captured this image manually, skip it
+            // (Note: parseDomToBlocks might not have src accessible easily, 
+            // but purely text blocks are safe to add)
+            continue;
+          }
+          aiBlocks.push(block);
+        }
+
         if (aiBlocks.length > 0) messages.push({ role: 'assistant', blocks: aiBlocks });
       }
     }
@@ -624,7 +658,7 @@ async function generatePDF(data) {
         }
       });
 
-      
+
       pageItems.forEach(item => {
         if (item.type === 'text' || item.type === 'header') {
           if (item.isCode) {

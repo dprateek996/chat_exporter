@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "ChatArchive - Export AI Conversations",
+  "name": "ChatArchive: Export ChatGPT, Gemini, Claude & Grok",
   "version": "2.0.0",
-  "description": "Export your AI conversations from ChatGPT, Google Gemini, and Claude AI to clean, formatted PDF documents.",
+  "description": "Save AI chats from ChatGPT, Gemini, Claude, Perplexity, and Grok as clean PDFs with images and code.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
